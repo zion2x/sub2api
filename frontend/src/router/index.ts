@@ -175,6 +175,16 @@ const routes: RouteRecordRaw[] = [
       title: 'Legal Document'
     }
   },
+  {
+    path: '/docs/wethink',
+    name: 'WeThinkDocs',
+    component: () => import('@/views/WeThinkDocsView.vue'),
+    meta: {
+      requiresAuth: false,
+      title: 'WeThink Usage Documentation',
+      titleKey: 'nav.usageDocs'
+    }
+  },
 
   // ==================== User Routes ====================
   {
@@ -728,7 +738,15 @@ let authInitialized = false
 const navigationLoading = useNavigationLoadingState()
 // 延迟初始化预加载，传入 router 实例
 let routePrefetch: ReturnType<typeof useRoutePrefetch> | null = null
-const BACKEND_MODE_ALLOWED_PATHS = ['/login', '/key-usage', '/setup', '/payment/result', '/payment/airwallex', '/legal']
+const BACKEND_MODE_ALLOWED_PATHS = [
+  '/login',
+  '/key-usage',
+  '/setup',
+  '/payment/result',
+  '/payment/airwallex',
+  '/legal',
+  '/docs/wethink'
+]
 const BACKEND_MODE_CALLBACK_PATHS = [
   '/auth/callback',
   '/auth/linuxdo/callback',
