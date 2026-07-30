@@ -1,6 +1,37 @@
 <template>
   <AppLayout>
     <TablePageLayout>
+      <template #actions>
+        <section
+          class="grid grid-cols-2 gap-2 lg:grid-cols-4"
+          :aria-label="t('admin.upstreams.overview.title')"
+        >
+          <div class="overview-metric" data-testid="upstream-overview-total">
+            <span class="overview-label">{{ t('admin.upstreams.overview.totalAccounts') }}</span>
+            <strong class="overview-value">{{ pagination.total }}</strong>
+          </div>
+          <div class="overview-metric" data-testid="upstream-overview-balance">
+            <span class="overview-label">{{ t('admin.upstreams.overview.pageBalance') }}</span>
+            <strong class="overview-value font-mono">{{ formatCurrency(overview.pageBalance) }}</strong>
+            <span class="overview-hint">
+              {{ t('admin.upstreams.overview.balanceCoverage', { known: overview.knownBalances, total: accounts.length }) }}
+            </span>
+          </div>
+          <div class="overview-metric" data-testid="upstream-overview-account-charge">
+            <span class="overview-label">{{ t('admin.upstreams.overview.todayAccountCharge') }}</span>
+            <strong class="overview-value font-mono">
+              {{ todayStatsLoading ? '...' : todayStatsFailed ? '-' : formatCurrency(overview.todayAccountCharge) }}
+            </strong>
+          </div>
+          <div class="overview-metric" data-testid="upstream-overview-actual-cost">
+            <span class="overview-label">{{ t('admin.upstreams.overview.todayActualCost') }}</span>
+            <strong class="overview-value font-mono">
+              {{ todayStatsLoading ? '...' : todayStatsFailed ? '-' : formatCurrency(overview.todayActualCost) }}
+            </strong>
+          </div>
+        </section>
+      </template>
+
       <template #filters>
         <div class="flex flex-wrap items-center gap-3">
           <div class="relative w-full sm:w-80">
@@ -63,7 +94,7 @@
             </template>
 
             <template #cell-provider_balance="{ row }">
-              <div class="min-w-28 space-y-1.5">
+              <div class="min-w-28 space-y-1.5" :data-testid="`upstream-balance-${row.id}`">
                 <span v-if="probeData(row)?.provider" class="badge badge-primary uppercase">
                   {{ probeData(row)?.provider }}
                 </span>
@@ -73,9 +104,6 @@
                 </div>
                 <div v-else-if="typeof probeData(row)?.balance === 'number'" class="font-mono text-sm font-semibold text-gray-900 dark:text-white">
                   {{ formatBalance(probeData(row)?.balance, probeData(row)?.currency) }}
-                </div>
-                <div v-else-if="typeof probeData(row)?.key_quota_remaining === 'number'" class="font-mono text-xs text-gray-600 dark:text-gray-300">
-                  {{ t('admin.upstreams.rawQuota', { value: formatQuota(probeData(row)?.key_quota_remaining) }) }}
                 </div>
                 <div v-else class="text-xs text-gray-400">{{ t('admin.upstreams.balanceUnavailable') }}</div>
               </div>
@@ -120,25 +148,20 @@
               </div>
             </template>
 
-            <template #cell-upstream_rate="{ row }">
-              <div class="min-w-28 space-y-1 text-xs">
-                <div v-if="typeof probeData(row)?.group_rate_multiplier === 'number'">
-                  {{ t('admin.upstreams.upstreamGroupRate', { value: formatRate(probeData(row)?.group_rate_multiplier) }) }}
+            <template #cell-rates="{ row }">
+              <div class="min-w-44 space-y-1.5">
+                <div
+                  class="flex items-baseline gap-2 font-mono text-sm font-semibold text-gray-900 dark:text-white"
+                  :data-testid="`upstream-rates-${row.id}`"
+                >
+                  <span :class="typeof upstreamRate(row) === 'number' ? 'text-primary-700 dark:text-primary-300' : 'text-gray-400'">
+                    {{ typeof upstreamRate(row) === 'number' ? `${formatRate(upstreamRate(row))}x` : '-' }}
+                  </span>
+                  <span class="text-gray-300 dark:text-dark-500">/</span>
+                  <span>{{ formatRate(row.rate_multiplier ?? 1) }}x</span>
                 </div>
-                <div v-if="typeof probeData(row)?.effective_rate_multiplier === 'number'" class="font-semibold text-primary-700 dark:text-primary-300">
-                  {{ t('admin.upstreams.upstreamEffectiveRate', { value: formatRate(probeData(row)?.effective_rate_multiplier) }) }}
-                </div>
-                <span
-                  v-if="typeof probeData(row)?.group_rate_multiplier !== 'number' && typeof probeData(row)?.effective_rate_multiplier !== 'number'"
-                  class="text-gray-400"
-                >{{ t('admin.upstreams.upstreamRateUnavailable') }}</span>
-              </div>
-            </template>
-
-            <template #cell-local_rate="{ row }">
-              <div class="min-w-40 space-y-1.5">
-                <div class="text-xs font-semibold text-gray-800 dark:text-gray-100">
-                  {{ t('admin.upstreams.accountRate', { value: formatRate(row.rate_multiplier ?? 1) }) }}
+                <div class="text-[11px] text-gray-400">
+                  {{ t('admin.upstreams.ratePairHint') }}
                 </div>
                 <div v-if="row.groups?.length" class="flex max-h-24 flex-col gap-1 overflow-y-auto pr-1">
                   <span
@@ -150,7 +173,6 @@
                     <span class="max-w-36 truncate">{{ group.name }}</span>&nbsp;{{ formatRate(group.rate_multiplier) }}x
                   </span>
                 </div>
-                <span v-else class="text-xs text-gray-400">{{ t('admin.upstreams.noLocalGroups') }}</span>
               </div>
             </template>
 
@@ -164,8 +186,19 @@
                   <div class="font-medium text-gray-800 dark:text-gray-100">
                     {{ t('admin.upstreams.todayRequests', { count: todayStats[String(row.id)]?.requests ?? 0 }) }}
                   </div>
-                  <div class="font-mono text-gray-500 dark:text-gray-400">
-                    {{ t('admin.upstreams.accountCost', { value: formatCurrency(todayStats[String(row.id)]?.cost ?? 0) }) }}
+                  <div class="text-gray-500 dark:text-gray-400">
+                    {{ t('admin.upstreams.todayTokens', { count: formatCount(todayStats[String(row.id)]?.tokens ?? 0) }) }}
+                  </div>
+                  <div
+                    class="font-mono font-semibold text-gray-800 dark:text-gray-100"
+                    :data-testid="`upstream-cost-${row.id}`"
+                  >
+                    {{ formatCurrency(todayStats[String(row.id)]?.cost ?? 0) }}
+                    <span class="px-0.5 text-gray-300 dark:text-dark-500">/</span>
+                    {{ formatCurrency(todayStats[String(row.id)]?.user_cost ?? 0) }}
+                  </div>
+                  <div class="text-[11px] text-gray-400">
+                    {{ t('admin.upstreams.costPairHint') }}
                   </div>
                 </template>
               </div>
@@ -284,8 +317,7 @@ const columns = computed<Column[]>(() => [
   { key: 'base_url', label: t('admin.upstreams.columns.baseUrl'), sortable: false, class: 'min-w-56' },
   { key: 'provider_balance', label: t('admin.upstreams.columns.providerBalance'), sortable: false },
   { key: 'remote_group', label: t('admin.upstreams.columns.remoteGroup'), sortable: false },
-  { key: 'upstream_rate', label: t('admin.upstreams.columns.upstreamRate'), sortable: false },
-  { key: 'local_rate', label: t('admin.upstreams.columns.localRate'), sortable: false },
+  { key: 'rates', label: t('admin.upstreams.columns.rates'), sortable: false },
   { key: 'today', label: t('admin.upstreams.columns.today'), sortable: false },
   { key: 'sync', label: t('admin.upstreams.columns.sync'), sortable: false },
   { key: 'actions', label: t('admin.upstreams.columns.actions'), sortable: false, class: 'w-14' }
@@ -309,9 +341,33 @@ function formatRate(value: number | undefined): string {
   return typeof value === 'number' ? value.toFixed(2) : '-'
 }
 
-function formatQuota(value: number | undefined): string {
+function formatCount(value: number | undefined): string {
   return typeof value === 'number' ? new Intl.NumberFormat().format(value) : '-'
 }
+
+function upstreamRate(account: Account): number | undefined {
+  const data = probeData(account)
+  return data?.effective_rate_multiplier ?? data?.group_rate_multiplier
+}
+
+const overview = computed(() => {
+  let pageBalance = 0
+  let knownBalances = 0
+  for (const account of accounts.value) {
+    const balance = probeData(account)?.balance
+    if (typeof balance === 'number') {
+      pageBalance += balance
+      knownBalances++
+    }
+  }
+
+  return {
+    pageBalance,
+    knownBalances,
+    todayAccountCharge: Object.values(todayStats.value).reduce((sum, stats) => sum + (stats.cost ?? 0), 0),
+    todayActualCost: Object.values(todayStats.value).reduce((sum, stats) => sum + (stats.user_cost ?? 0), 0)
+  }
+})
 
 function formatBalance(value: number | undefined, currency?: string): string {
   if (typeof value !== 'number') return '-'
@@ -476,5 +532,21 @@ onBeforeUnmount(() => {
 
 .upstreams-table :deep(tbody tr) {
   @apply align-top;
+}
+
+.overview-metric {
+  @apply flex min-h-20 flex-col justify-center rounded-lg border border-gray-200 bg-white px-4 py-3 dark:border-dark-700 dark:bg-dark-800;
+}
+
+.overview-label {
+  @apply text-xs text-gray-500 dark:text-dark-400;
+}
+
+.overview-value {
+  @apply mt-1 text-lg font-semibold text-gray-900 dark:text-white;
+}
+
+.overview-hint {
+  @apply mt-0.5 text-[11px] text-gray-400 dark:text-dark-500;
 }
 </style>

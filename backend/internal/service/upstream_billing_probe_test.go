@@ -363,6 +363,65 @@ func TestParseSub2APIUpstreamInfoResponse(t *testing.T) {
 	require.NotContains(t, data, "secret")
 }
 
+func TestParseSub2APIUsageResponseUsesOnlyExplicitAccountBalance(t *testing.T) {
+	observedAt := time.Date(2026, time.July, 13, 2, 0, 0, 0, time.UTC)
+	data, err := parseSub2APIUsageResponse([]byte(`{
+		"mode":"unrestricted",
+		"balance":12.5,
+		"remaining":99,
+		"unit":"USD"
+	}`), observedAt)
+
+	require.NoError(t, err)
+	require.Equal(t, "sub2api", data["provider"])
+	require.Equal(t, 12.5, data["balance"])
+	require.Equal(t, "USD", data["currency"])
+	require.NotContains(t, data, "remaining")
+
+	_, err = parseSub2APIUsageResponse([]byte(`{
+		"mode":"quota_limited",
+		"remaining":99,
+		"quota":{"remaining":99},
+		"unit":"USD"
+	}`), observedAt)
+	require.ErrorContains(t, err, "does not include account balance")
+}
+
+func TestUpstreamBillingProbeFallsBackToCCSwitchUsageBalance(t *testing.T) {
+	account := &Account{
+		ID:          173,
+		Platform:    PlatformOpenAI,
+		Type:        AccountTypeAPIKey,
+		Status:      StatusActive,
+		Concurrency: 1,
+		Credentials: map[string]any{
+			"api_key":  "sk-sub2api",
+			"base_url": "https://sub2api.example/v1",
+		},
+	}
+	repo := &upstreamBillingProbeAccountRepo{accounts: map[int64]*Account{account.ID: account}}
+	response := func(status int, body string) *http.Response {
+		return &http.Response{StatusCode: status, Header: http.Header{}, Body: io.NopCloser(strings.NewReader(body))}
+	}
+	upstream := &httpUpstreamRecorder{responses: []*http.Response{
+		response(http.StatusNotFound, `{"message":"not found"}`),
+		response(http.StatusOK, `{"mode":"unrestricted","balance":12.5,"remaining":12.5,"unit":"USD"}`),
+	}}
+	svc := newUpstreamBillingProbeTestService(repo, upstream, &upstreamBillingProbeSettingRepo{})
+	fixedNow := time.Date(2026, time.July, 13, 2, 0, 0, 0, time.UTC)
+	svc.now = func() time.Time { return fixedNow }
+
+	snapshot, err := svc.ProbeAccount(context.Background(), account.ID)
+
+	require.NoError(t, err)
+	require.Equal(t, UpstreamBillingProbeStatusOK, snapshot.Status)
+	require.Equal(t, 12.5, snapshot.Data["balance"])
+	require.NotContains(t, snapshot.Data, "remaining")
+	require.Len(t, upstream.requests, 2)
+	require.Equal(t, "https://sub2api.example/v1/sub2api/upstream-info", upstream.requests[0].URL.String())
+	require.Equal(t, "https://sub2api.example/v1/usage", upstream.requests[1].URL.String())
+}
+
 func TestUpstreamBillingProbeDetectsNewAPIAndChecksGroup(t *testing.T) {
 	account := &Account{
 		ID:          171,
@@ -382,6 +441,7 @@ func TestUpstreamBillingProbeDetectsNewAPIAndChecksGroup(t *testing.T) {
 		return &http.Response{StatusCode: status, Header: http.Header{}, Body: io.NopCloser(strings.NewReader(body))}
 	}
 	upstream := &httpUpstreamRecorder{responses: []*http.Response{
+		response(http.StatusNotFound, `{"message":"not found"}`),
 		response(http.StatusNotFound, `{"message":"not found"}`),
 		response(http.StatusNotFound, `{"message":"not found"}`),
 		response(http.StatusOK, `{"code":true,"message":"ok","data":{"object":"token_usage","name":"upstream-key","total_granted":2000000,"total_available":1250000,"total_used":750000,"unlimited_quota":false}}`),
@@ -408,14 +468,14 @@ func TestUpstreamBillingProbeDetectsNewAPIAndChecksGroup(t *testing.T) {
 	require.NotContains(t, snapshot.Data, "remote_group_name")
 	require.NotContains(t, snapshot.Data, "remote_group_exists")
 	require.NotContains(t, snapshot.Data, "effective_rate_multiplier")
-	require.Len(t, upstream.requests, 5)
-	require.Equal(t, "https://newapi.example/api/usage/token/", upstream.requests[2].URL.String())
-	require.Equal(t, "Bearer sk-newapi", upstream.requests[2].Header.Get("Authorization"))
-	require.Equal(t, "https://newapi.example/api/status", upstream.requests[3].URL.String())
-	require.Empty(t, upstream.requests[3].Header.Get("Authorization"))
-	require.Equal(t, "tenant-a", getHeaderRaw(upstream.requests[3].Header, "x-tenant"))
-	require.Equal(t, "https://newapi.example/v1/models", upstream.requests[4].URL.String())
-	require.Equal(t, "Bearer sk-newapi", upstream.requests[4].Header.Get("Authorization"))
+	require.Len(t, upstream.requests, 6)
+	require.Equal(t, "https://newapi.example/api/usage/token/", upstream.requests[3].URL.String())
+	require.Equal(t, "Bearer sk-newapi", upstream.requests[3].Header.Get("Authorization"))
+	require.Equal(t, "https://newapi.example/api/status", upstream.requests[4].URL.String())
+	require.Empty(t, upstream.requests[4].Header.Get("Authorization"))
+	require.Equal(t, "tenant-a", getHeaderRaw(upstream.requests[4].Header, "x-tenant"))
+	require.Equal(t, "https://newapi.example/v1/models", upstream.requests[5].URL.String())
+	require.Equal(t, "Bearer sk-newapi", upstream.requests[5].Header.Get("Authorization"))
 }
 
 func TestParseNewAPIUsageResponseRejectsCodeFalse(t *testing.T) {

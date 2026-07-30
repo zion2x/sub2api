@@ -140,10 +140,17 @@ type upstreamInfoProbeResponse struct {
 	ObservedAt              string   `json:"observed_at"`
 }
 
+type sub2APIUsageProbeResponse struct {
+	Mode    string   `json:"mode"`
+	Balance *float64 `json:"balance"`
+	Unit    string   `json:"unit"`
+}
+
 type upstreamProbeEndpoint struct {
 	provider string
 	path     string
 	newAPI   bool
+	usage    bool
 }
 
 type upstreamProbeHTTPResponse struct {
@@ -677,6 +684,7 @@ func (s *UpstreamBillingProbeService) probeLoadedAccount(ctx context.Context, ac
 
 func upstreamProbeEndpoints(account *Account) []upstreamProbeEndpoint {
 	sub2apiInfo := upstreamProbeEndpoint{provider: "sub2api", path: "/v1/sub2api/upstream-info"}
+	sub2apiUsage := upstreamProbeEndpoint{provider: "sub2api", path: "/v1/usage", usage: true}
 	sub2apiBilling := upstreamProbeEndpoint{provider: "sub2api", path: "/v1/sub2api/billing"}
 	newAPIUsage := upstreamProbeEndpoint{provider: "newapi", path: "/api/usage/token/", newAPI: true}
 	provider := ""
@@ -689,9 +697,9 @@ func upstreamProbeEndpoints(account *Account) []upstreamProbeEndpoint {
 		}
 	}
 	if provider == "newapi" {
-		return []upstreamProbeEndpoint{newAPIUsage, sub2apiInfo, sub2apiBilling}
+		return []upstreamProbeEndpoint{newAPIUsage, sub2apiInfo, sub2apiUsage, sub2apiBilling}
 	}
-	return []upstreamProbeEndpoint{sub2apiInfo, sub2apiBilling, newAPIUsage}
+	return []upstreamProbeEndpoint{sub2apiInfo, sub2apiUsage, sub2apiBilling, newAPIUsage}
 }
 
 func buildUpstreamProbeEndpointURL(baseURL string, endpoint upstreamProbeEndpoint) string {
@@ -805,6 +813,9 @@ func parseUpstreamProbeEndpointResponse(endpoint upstreamProbeEndpoint, body []b
 	if endpoint.newAPI {
 		return parseNewAPIUsageResponse(body, observedAt)
 	}
+	if endpoint.usage {
+		return parseSub2APIUsageResponse(body, observedAt)
+	}
 	var identity struct {
 		Object string `json:"object"`
 	}
@@ -819,6 +830,30 @@ func parseUpstreamProbeEndpointResponse(endpoint upstreamProbeEndpoint, body []b
 	default:
 		return nil, fmt.Errorf("unexpected upstream response schema")
 	}
+}
+
+func parseSub2APIUsageResponse(body []byte, observedAt time.Time) (map[string]any, error) {
+	var response sub2APIUsageProbeResponse
+	if err := json.Unmarshal(body, &response); err != nil {
+		return nil, err
+	}
+	if response.Balance == nil {
+		return nil, fmt.Errorf("sub2api usage response does not include account balance")
+	}
+	if math.IsNaN(*response.Balance) || math.IsInf(*response.Balance, 0) {
+		return nil, fmt.Errorf("invalid upstream balance")
+	}
+
+	data := map[string]any{
+		"object":      "sub2api.usage",
+		"provider":    "sub2api",
+		"balance":     *response.Balance,
+		"observed_at": observedAt.UTC().Format(time.RFC3339Nano),
+	}
+	if unit := strings.TrimSpace(response.Unit); unit != "" {
+		data["currency"] = unit
+	}
+	return data, nil
 }
 
 func parseSub2APIUpstreamInfoResponse(body []byte) (map[string]any, error) {

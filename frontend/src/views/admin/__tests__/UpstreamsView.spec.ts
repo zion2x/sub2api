@@ -41,6 +41,7 @@ const DataTableStub = {
       <div v-for="row in data" :key="row.id" :data-testid="'upstream-row-' + row.id">
         <slot name="cell-provider_balance" :row="row" />
         <slot name="cell-remote_group" :row="row" />
+        <slot name="cell-rates" :row="row" />
         <slot name="cell-today" :row="row" />
         <slot name="cell-sync" :row="row" />
       </div>
@@ -54,6 +55,7 @@ const baseAccount = (snapshot: Record<string, unknown>) => ({
   platform: 'openai',
   type: 'apikey',
   status: 'active',
+  rate_multiplier: 0.6,
   credentials: { base_url: 'https://upstream.example/v1' },
   groups: [],
   extra: { upstream_billing_probe: snapshot }
@@ -65,7 +67,7 @@ function mountView() {
       stubs: {
         AppLayout: { template: '<div><slot /></div>' },
         TablePageLayout: {
-          template: '<div><slot name="filters" /><slot name="table" /><slot name="pagination" /></div>'
+          template: '<div><slot name="actions" /><slot name="filters" /><slot name="table" /><slot name="pagination" /></div>'
         },
         DataTable: DataTableStub,
         EmptyState: true,
@@ -82,7 +84,60 @@ describe('admin UpstreamsView', () => {
     listUpstreams.mockReset()
     getBatchTodayStats.mockReset()
     showError.mockReset()
-    getBatchTodayStats.mockResolvedValue({ stats: { '7': { requests: 2, cost: 1.25 } } })
+    getBatchTodayStats.mockResolvedValue({
+      stats: { '7': { requests: 2, tokens: 1200, cost: 1.25, standard_cost: 1, user_cost: 0.8 } }
+    })
+  })
+
+  it('uses the upstream account balance and never falls back to API key quota', async () => {
+    listUpstreams.mockResolvedValue({
+      items: [baseAccount({
+        status: 'ok',
+        last_attempt_at: '2026-07-29T01:00:00Z',
+        received_at: '2026-07-29T01:00:00Z',
+        next_probe_at: '2099-01-01T00:01:00Z',
+        fresh_until: '2099-01-01T00:02:00Z',
+        data: { provider: 'sub2api', key_quota_remaining: 99 }
+      })],
+      total: 1,
+      page: 1,
+      page_size: 20,
+      pages: 1
+    })
+
+    const wrapper = mountView()
+    await flushPromises()
+
+    expect(wrapper.get('[data-testid="upstream-balance-7"]').text()).toContain('admin.upstreams.balanceUnavailable')
+    expect(wrapper.get('[data-testid="upstream-balance-7"]').text()).not.toContain('99')
+    wrapper.unmount()
+  })
+
+  it('shows multiplier and daily cost pairs with a compact page overview', async () => {
+    listUpstreams.mockResolvedValue({
+      items: [baseAccount({
+        status: 'ok',
+        last_attempt_at: '2026-07-29T01:00:00Z',
+        received_at: '2026-07-29T01:00:00Z',
+        next_probe_at: '2099-01-01T00:01:00Z',
+        fresh_until: '2099-01-01T00:02:00Z',
+        data: { provider: 'sub2api', balance: 5, effective_rate_multiplier: 0.75 }
+      })],
+      total: 1,
+      page: 1,
+      page_size: 20,
+      pages: 1
+    })
+
+    const wrapper = mountView()
+    await flushPromises()
+
+    expect(wrapper.get('[data-testid="upstream-rates-7"]').text().replace(/\s+/g, '')).toBe('0.75x/0.60x')
+    expect(wrapper.get('[data-testid="upstream-cost-7"]').text().replace(/\s+/g, '')).toBe('$1.25/$0.80')
+    expect(wrapper.get('[data-testid="upstream-overview-balance"]').text()).toContain('$5.00')
+    expect(wrapper.get('[data-testid="upstream-overview-account-charge"]').text()).toContain('$1.25')
+    expect(wrapper.get('[data-testid="upstream-overview-actual-cost"]').text()).toContain('$0.80')
+    wrapper.unmount()
   })
 
   it('does not present a disabled remote group as healthy', async () => {
