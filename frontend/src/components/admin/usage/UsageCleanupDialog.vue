@@ -1,7 +1,63 @@
 <template>
   <BaseDialog :show="show" :title="t('admin.usage.cleanup.title')" width="wide" @close="handleClose">
     <div class="space-y-4">
+      <div class="rounded-xl border border-gray-200 p-4 dark:border-dark-700">
+        <div class="mb-3 flex flex-wrap gap-2" role="radiogroup" :aria-label="t('admin.usage.cleanup.modeLabel')">
+          <button
+            type="button"
+            class="rounded-lg px-3 py-2 text-sm font-medium transition-colors"
+            :class="cleanupMode === 'retention'
+              ? 'bg-primary-600 text-white'
+              : 'bg-gray-100 text-gray-600 hover:bg-gray-200 dark:bg-dark-700 dark:text-gray-300'"
+            :aria-checked="cleanupMode === 'retention'"
+            role="radio"
+            data-testid="cleanup-mode-retention"
+            @click="cleanupMode = 'retention'"
+          >
+            {{ t('admin.usage.cleanup.retentionMode') }}
+          </button>
+          <button
+            type="button"
+            class="rounded-lg px-3 py-2 text-sm font-medium transition-colors"
+            :class="cleanupMode === 'range'
+              ? 'bg-primary-600 text-white'
+              : 'bg-gray-100 text-gray-600 hover:bg-gray-200 dark:bg-dark-700 dark:text-gray-300'"
+            :aria-checked="cleanupMode === 'range'"
+            role="radio"
+            data-testid="cleanup-mode-range"
+            @click="cleanupMode = 'range'"
+          >
+            {{ t('admin.usage.cleanup.rangeMode') }}
+          </button>
+        </div>
+
+        <div v-if="cleanupMode === 'retention'" class="space-y-2">
+          <label class="block text-sm font-medium text-gray-700 dark:text-gray-200">
+            {{ t('admin.usage.cleanup.retentionLabel') }}
+          </label>
+          <div class="flex max-w-md items-center gap-2">
+            <input
+              v-model.number="retentionValue"
+              type="number"
+              min="1"
+              :max="retentionMax"
+              class="input w-28"
+              data-testid="retention-value"
+            />
+            <select v-model="retentionUnit" class="input flex-1" data-testid="retention-unit">
+              <option value="day">{{ t('admin.usage.cleanup.units.day') }}</option>
+              <option value="week">{{ t('admin.usage.cleanup.units.week') }}</option>
+              <option value="month">{{ t('admin.usage.cleanup.units.month') }}</option>
+            </select>
+          </div>
+          <p class="text-xs text-gray-500 dark:text-gray-400">
+            {{ t('admin.usage.cleanup.retentionHint', { value: retentionValue, unit: retentionUnitLabel }) }}
+          </p>
+        </div>
+      </div>
+
       <UsageFilters
+        v-if="cleanupMode === 'range'"
         v-model="localFilters"
         v-model:startDate="localStartDate"
         v-model:endDate="localEndDate"
@@ -97,7 +153,7 @@
   <ConfirmDialog
     :show="confirmVisible"
     :title="t('admin.usage.cleanup.confirmTitle')"
-    :message="t('admin.usage.cleanup.confirmMessage')"
+    :message="cleanupConfirmMessage"
     :confirm-text="t('admin.usage.cleanup.confirmSubmit')"
     danger
     @confirm="submitCleanup"
@@ -116,7 +172,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, watch, onUnmounted } from 'vue'
+import { computed, ref, watch, onUnmounted } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { useAppStore } from '@/stores/app'
 import BaseDialog from '@/components/common/BaseDialog.vue'
@@ -124,7 +180,12 @@ import ConfirmDialog from '@/components/common/ConfirmDialog.vue'
 import Pagination from '@/components/common/Pagination.vue'
 import UsageFilters from '@/components/admin/usage/UsageFilters.vue'
 import { adminUsageAPI } from '@/api/admin/usage'
-import type { AdminUsageQueryParams, UsageCleanupTask, CreateUsageCleanupTaskRequest } from '@/api/admin/usage'
+import type {
+  AdminUsageQueryParams,
+  UsageCleanupTask,
+  CreateUsageCleanupTaskRequest,
+  UsageRetentionUnit
+} from '@/api/admin/usage'
 import { requestTypeToLegacyStream } from '@/utils/usageRequestType'
 
 interface Props {
@@ -143,6 +204,9 @@ const appStore = useAppStore()
 const localFilters = ref<AdminUsageQueryParams>({})
 const localStartDate = ref('')
 const localEndDate = ref('')
+const cleanupMode = ref<'retention' | 'range'>('retention')
+const retentionValue = ref(1)
+const retentionUnit = ref<UsageRetentionUnit>('week')
 
 const tasks = ref<UsageCleanupTask[]>([])
 const tasksLoading = ref(false)
@@ -166,7 +230,28 @@ const resetFilters = () => {
   localFilters.value.end_date = localEndDate.value
   tasksPage.value = 1
   tasksTotal.value = 0
+  cleanupMode.value = 'retention'
+  retentionValue.value = 1
+  retentionUnit.value = 'week'
 }
+
+const retentionMax = computed(() => {
+  if (retentionUnit.value === 'day') return 3650
+  if (retentionUnit.value === 'week') return 520
+  return 120
+})
+
+const retentionUnitLabel = computed(() => t(`admin.usage.cleanup.units.${retentionUnit.value}`))
+
+const cleanupConfirmMessage = computed(() => {
+  if (cleanupMode.value === 'retention') {
+    return t('admin.usage.cleanup.confirmRetentionMessage', {
+      value: retentionValue.value,
+      unit: retentionUnitLabel.value
+    })
+  }
+  return t('admin.usage.cleanup.confirmMessage')
+})
 
 const startPolling = () => {
   stopPolling()
@@ -222,6 +307,13 @@ const formatDateTime = (value?: string | null) => {
 }
 
 const formatRange = (task: UsageCleanupTask) => {
+  if (task.filters.retention_value && task.filters.retention_unit) {
+    return t('admin.usage.cleanup.retentionTaskRange', {
+      value: task.filters.retention_value,
+      unit: t(`admin.usage.cleanup.units.${task.filters.retention_unit}`),
+      cutoff: formatDateTime(task.filters.end_time)
+    })
+  }
   const start = formatDateTime(task.filters.start_time)
   const end = formatDateTime(task.filters.end_time)
   return `${start} ~ ${end}`
@@ -285,6 +377,19 @@ const openCancelConfirm = (task: UsageCleanupTask) => {
 }
 
 const buildPayload = (): CreateUsageCleanupTaskRequest | null => {
+  if (cleanupMode.value === 'retention') {
+    const value = Number(retentionValue.value)
+    if (!Number.isInteger(value) || value < 1 || value > retentionMax.value) {
+      appStore.showError(t('admin.usage.cleanup.invalidRetention', { max: retentionMax.value }))
+      return null
+    }
+    return {
+      retention_value: value,
+      retention_unit: retentionUnit.value,
+      timezone: getUserTimezone()
+    }
+  }
+
   if (!localStartDate.value || !localEndDate.value) {
     appStore.showError(t('admin.usage.cleanup.missingRange'))
     return null

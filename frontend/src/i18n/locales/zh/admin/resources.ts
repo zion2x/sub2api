@@ -562,6 +562,19 @@ export default {
       cleanup: {
         button: '清理',
         title: '清理使用记录',
+        modeLabel: '清理方式',
+        retentionMode: '保留最近',
+        rangeMode: '指定日期范围',
+        retentionLabel: '请求明细保留时长',
+        retentionHint: '将保留最近 {value} {unit}，更早的请求明细会被删除。此操作只执行一次。',
+        confirmRetentionMessage: '确定只保留最近 {value} {unit}，并删除更早的请求明细吗？清理不可恢复。',
+        retentionTaskRange: '保留最近 {value} {unit}（删除截止：{cutoff}）',
+        invalidRetention: '请输入 1 到 {max} 之间的整数',
+        units: {
+          day: '天',
+          week: '周',
+          month: '月'
+        },
         warning: '清理不可恢复，且会影响历史统计回看。',
         submit: '提交清理',
         submitting: '提交中...',

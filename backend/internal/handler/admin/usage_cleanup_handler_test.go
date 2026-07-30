@@ -351,6 +351,60 @@ func TestUsageHandlerCreateCleanupTaskSuccess(t *testing.T) {
 	require.True(t, created.Filters.EndTime.Equal(end))
 }
 
+func TestUsageHandlerCreateRetentionCleanupTask(t *testing.T) {
+	repo := &cleanupRepoStub{}
+	cfg := &config.Config{UsageCleanup: config.UsageCleanupConfig{Enabled: true, MaxRangeDays: 1}}
+	cleanupService := service.NewUsageCleanupService(repo, nil, nil, cfg)
+	router := setupCleanupRouter(cleanupService, 99)
+
+	before := time.Now().UTC().AddDate(0, 0, -7)
+	payload := map[string]any{
+		"retention_value": 1,
+		"retention_unit":  "week",
+		"timezone":        "UTC",
+	}
+	body, err := json.Marshal(payload)
+	require.NoError(t, err)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/admin/usage/cleanup-tasks", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	recorder := httptest.NewRecorder()
+	router.ServeHTTP(recorder, req)
+	after := time.Now().UTC().AddDate(0, 0, -7)
+
+	require.Equal(t, http.StatusOK, recorder.Code)
+	repo.mu.Lock()
+	defer repo.mu.Unlock()
+	require.Len(t, repo.created, 1)
+	created := repo.created[0]
+	require.Equal(t, 1, created.Filters.RetentionValue)
+	require.Equal(t, service.UsageRetentionUnitWeek, created.Filters.RetentionUnit)
+	require.Equal(t, time.Unix(0, 0).UTC(), created.Filters.StartTime)
+	require.False(t, created.Filters.EndTime.Before(before))
+	require.False(t, created.Filters.EndTime.After(after))
+}
+
+func TestUsageHandlerCreateRetentionCleanupTaskRejectsInvalidInput(t *testing.T) {
+	tests := []string{
+		`{"retention_unit":"week","timezone":"UTC"}`,
+		`{"retention_value":1,"retention_unit":"year","timezone":"UTC"}`,
+		`{"retention_value":0,"retention_unit":"day","timezone":"UTC"}`,
+	}
+	for _, body := range tests {
+		repo := &cleanupRepoStub{}
+		cfg := &config.Config{UsageCleanup: config.UsageCleanupConfig{Enabled: true, MaxRangeDays: 31}}
+		cleanupService := service.NewUsageCleanupService(repo, nil, nil, cfg)
+		router := setupCleanupRouter(cleanupService, 99)
+
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/admin/usage/cleanup-tasks", bytes.NewBufferString(body))
+		req.Header.Set("Content-Type", "application/json")
+		recorder := httptest.NewRecorder()
+		router.ServeHTTP(recorder, req)
+
+		require.Equal(t, http.StatusBadRequest, recorder.Code)
+	}
+}
+
 func TestUsageHandlerListCleanupTasksUnavailable(t *testing.T) {
 	router := setupCleanupRouter(nil, 0)
 

@@ -44,17 +44,19 @@ func NewUsageHandler(
 
 // CreateUsageCleanupTaskRequest represents cleanup task creation request
 type CreateUsageCleanupTaskRequest struct {
-	StartDate   string  `json:"start_date"`
-	EndDate     string  `json:"end_date"`
-	UserID      *int64  `json:"user_id"`
-	APIKeyID    *int64  `json:"api_key_id"`
-	AccountID   *int64  `json:"account_id"`
-	GroupID     *int64  `json:"group_id"`
-	Model       *string `json:"model"`
-	RequestType *string `json:"request_type"`
-	Stream      *bool   `json:"stream"`
-	BillingType *int8   `json:"billing_type"`
-	Timezone    string  `json:"timezone"`
+	StartDate      string  `json:"start_date"`
+	EndDate        string  `json:"end_date"`
+	RetentionValue *int    `json:"retention_value"`
+	RetentionUnit  string  `json:"retention_unit"`
+	UserID         *int64  `json:"user_id"`
+	APIKeyID       *int64  `json:"api_key_id"`
+	AccountID      *int64  `json:"account_id"`
+	GroupID        *int64  `json:"group_id"`
+	Model          *string `json:"model"`
+	RequestType    *string `json:"request_type"`
+	Stream         *bool   `json:"stream"`
+	BillingType    *int8   `json:"billing_type"`
+	Timezone       string  `json:"timezone"`
 }
 
 // List handles listing all usage records with filters
@@ -476,22 +478,46 @@ func (h *UsageHandler) CreateCleanupTask(c *gin.Context) {
 	}
 	req.StartDate = strings.TrimSpace(req.StartDate)
 	req.EndDate = strings.TrimSpace(req.EndDate)
-	if req.StartDate == "" || req.EndDate == "" {
-		response.BadRequest(c, "start_date and end_date are required")
-		return
-	}
+	req.RetentionUnit = strings.ToLower(strings.TrimSpace(req.RetentionUnit))
+	retentionRequested := req.RetentionValue != nil || req.RetentionUnit != ""
 
-	startTime, err := timezone.ParseInUserLocation("2006-01-02", req.StartDate, req.Timezone)
-	if err != nil {
-		response.BadRequest(c, "Invalid start_date format, use YYYY-MM-DD")
-		return
+	var startTime time.Time
+	var endTime time.Time
+	if retentionRequested {
+		if req.RetentionValue == nil {
+			response.BadRequest(c, "retention_value is required")
+			return
+		}
+		cutoff, err := service.UsageRetentionCutoff(
+			timezone.NowInUserLocation(req.Timezone),
+			*req.RetentionValue,
+			req.RetentionUnit,
+		)
+		if err != nil {
+			response.BadRequest(c, err.Error())
+			return
+		}
+		startTime = time.Unix(0, 0).UTC()
+		endTime = cutoff
+	} else {
+		if req.StartDate == "" || req.EndDate == "" {
+			response.BadRequest(c, "start_date and end_date are required")
+			return
+		}
+
+		var err error
+		startTime, err = timezone.ParseInUserLocation("2006-01-02", req.StartDate, req.Timezone)
+		if err != nil {
+			response.BadRequest(c, "Invalid start_date format, use YYYY-MM-DD")
+			return
+		}
+		endTime, err = timezone.ParseInUserLocation("2006-01-02", req.EndDate, req.Timezone)
+		if err != nil {
+			response.BadRequest(c, "Invalid end_date format, use YYYY-MM-DD")
+			return
+		}
+		endTime = endTime.Add(24*time.Hour - time.Nanosecond)
 	}
-	endTime, err := timezone.ParseInUserLocation("2006-01-02", req.EndDate, req.Timezone)
-	if err != nil {
-		response.BadRequest(c, "Invalid end_date format, use YYYY-MM-DD")
-		return
-	}
-	endTime = endTime.Add(24*time.Hour - time.Nanosecond)
 
 	var requestType *int16
 	stream := req.Stream
@@ -517,6 +543,10 @@ func (h *UsageHandler) CreateCleanupTask(c *gin.Context) {
 		RequestType: requestType,
 		Stream:      stream,
 		BillingType: req.BillingType,
+	}
+	if retentionRequested {
+		filters.RetentionValue = *req.RetentionValue
+		filters.RetentionUnit = req.RetentionUnit
 	}
 
 	var userID any

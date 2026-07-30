@@ -2,6 +2,8 @@ package service
 
 import (
 	"context"
+	"fmt"
+	"strings"
 	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/pkg/pagination"
@@ -13,6 +15,10 @@ const (
 	UsageCleanupStatusSucceeded = "succeeded"
 	UsageCleanupStatusFailed    = "failed"
 	UsageCleanupStatusCanceled  = "canceled"
+
+	UsageRetentionUnitDay   = "day"
+	UsageRetentionUnitWeek  = "week"
+	UsageRetentionUnitMonth = "month"
 )
 
 // UsageCleanupFilters 定义清理任务过滤条件
@@ -36,6 +42,55 @@ type UsageCleanupFilters struct {
 	RequestType *int16    `json:"request_type,omitempty"`
 	Stream      *bool     `json:"stream,omitempty"`
 	BillingType *int8     `json:"billing_type,omitempty"`
+	// RetentionValue/RetentionUnit identify a relative-retention cleanup.
+	// The absolute cutoff is persisted in EndTime so retries always delete the
+	// same immutable range instead of moving with the current time.
+	RetentionValue int    `json:"retention_value,omitempty"`
+	RetentionUnit  string `json:"retention_unit,omitempty"`
+}
+
+func (f UsageCleanupFilters) IsRetentionCleanup() bool {
+	return f.RetentionValue > 0 || strings.TrimSpace(f.RetentionUnit) != ""
+}
+
+// UsageRetentionCutoff converts a relative retention window to an immutable
+// cutoff. Days and weeks use calendar-day arithmetic so DST transitions do not
+// move the user's wall-clock cutoff. Months clamp to the target month's last day.
+func UsageRetentionCutoff(now time.Time, value int, unit string) (time.Time, error) {
+	unit = strings.ToLower(strings.TrimSpace(unit))
+	if value <= 0 {
+		return time.Time{}, fmt.Errorf("retention_value must be positive")
+	}
+
+	switch unit {
+	case UsageRetentionUnitDay:
+		if value > 3650 {
+			return time.Time{}, fmt.Errorf("retention_value exceeds 3650 days")
+		}
+		return now.AddDate(0, 0, -value), nil
+	case UsageRetentionUnitWeek:
+		if value > 520 {
+			return time.Time{}, fmt.Errorf("retention_value exceeds 520 weeks")
+		}
+		return now.AddDate(0, 0, -7*value), nil
+	case UsageRetentionUnitMonth:
+		if value > 120 {
+			return time.Time{}, fmt.Errorf("retention_value exceeds 120 months")
+		}
+		return subtractUsageRetentionMonths(now, value), nil
+	default:
+		return time.Time{}, fmt.Errorf("retention_unit must be day, week, or month")
+	}
+}
+
+func subtractUsageRetentionMonths(now time.Time, months int) time.Time {
+	targetMonthStart := time.Date(now.Year(), now.Month()-time.Month(months), 1, now.Hour(), now.Minute(), now.Second(), now.Nanosecond(), now.Location())
+	lastDay := time.Date(targetMonthStart.Year(), targetMonthStart.Month()+1, 0, now.Hour(), now.Minute(), now.Second(), now.Nanosecond(), now.Location()).Day()
+	day := now.Day()
+	if day > lastDay {
+		day = lastDay
+	}
+	return time.Date(targetMonthStart.Year(), targetMonthStart.Month(), day, now.Hour(), now.Minute(), now.Second(), now.Nanosecond(), now.Location())
 }
 
 // UsageCleanupTask 表示使用记录清理任务

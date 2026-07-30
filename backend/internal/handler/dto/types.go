@@ -569,16 +569,18 @@ type AdminUsageLog struct {
 }
 
 type UsageCleanupFilters struct {
-	StartTime   time.Time `json:"start_time"`
-	EndTime     time.Time `json:"end_time"`
-	UserID      *int64    `json:"user_id,omitempty"`
-	APIKeyID    *int64    `json:"api_key_id,omitempty"`
-	AccountID   *int64    `json:"account_id,omitempty"`
-	GroupID     *int64    `json:"group_id,omitempty"`
-	Model       *string   `json:"model,omitempty"`
-	RequestType *string   `json:"request_type,omitempty"`
-	Stream      *bool     `json:"stream,omitempty"`
-	BillingType *int8     `json:"billing_type,omitempty"`
+	StartTime      time.Time `json:"start_time"`
+	EndTime        time.Time `json:"end_time"`
+	UserID         *int64    `json:"user_id,omitempty"`
+	APIKeyID       *int64    `json:"api_key_id,omitempty"`
+	AccountID      *int64    `json:"account_id,omitempty"`
+	GroupID        *int64    `json:"group_id,omitempty"`
+	Model          *string   `json:"model,omitempty"`
+	RequestType    *string   `json:"request_type,omitempty"`
+	Stream         *bool     `json:"stream,omitempty"`
+	BillingType    *int8     `json:"billing_type,omitempty"`
+	RetentionValue int       `json:"retention_value,omitempty"`
+	RetentionUnit  string    `json:"retention_unit,omitempty"`
 }
 
 type UsageCleanupTask struct {

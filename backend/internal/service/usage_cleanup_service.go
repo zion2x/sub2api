@@ -53,6 +53,9 @@ func describeUsageCleanupFilters(filters UsageCleanupFilters) string {
 	var parts []string
 	parts = append(parts, "start="+filters.StartTime.UTC().Format(time.RFC3339))
 	parts = append(parts, "end="+filters.EndTime.UTC().Format(time.RFC3339))
+	if filters.IsRetentionCleanup() {
+		parts = append(parts, fmt.Sprintf("retention=%d_%s", filters.RetentionValue, filters.RetentionUnit))
+	}
 	if filters.UserID != nil {
 		parts = append(parts, fmt.Sprintf("user_id=%d", *filters.UserID))
 	}
@@ -247,7 +250,11 @@ func (s *UsageCleanupService) executeTask(ctx context.Context, task *UsageCleanu
 		logger.LegacyPrintf("service.usage_cleanup", "[UsageCleanup] task succeeded: task=%d deleted_rows=%d duration=%s", task.ID, deletedTotal, time.Since(start))
 	}
 
-	if s.dashboard != nil {
+	// Relative-retention cleanup intentionally preserves hourly/daily
+	// aggregates. It removes request details only, matching the automatic raw
+	// usage-log retention policy. Explicit range cleanup still recomputes the
+	// affected aggregate range for backwards-compatible behavior.
+	if s.dashboard != nil && !task.Filters.IsRetentionCleanup() {
 		if err := s.dashboard.TriggerRecomputeRange(task.Filters.StartTime, task.Filters.EndTime); err != nil {
 			logger.LegacyPrintf("service.usage_cleanup", "[UsageCleanup] trigger dashboard recompute failed: task=%d err=%v", task.ID, err)
 		} else {
@@ -294,6 +301,12 @@ func (s *UsageCleanupService) validateFilters(filters UsageCleanupFilters) error
 	}
 	if filters.EndTime.Before(filters.StartTime) {
 		return infraerrors.BadRequest("USAGE_CLEANUP_INVALID_RANGE", "end_date must be after start_date")
+	}
+	if filters.IsRetentionCleanup() {
+		if _, err := UsageRetentionCutoff(time.Now(), filters.RetentionValue, filters.RetentionUnit); err != nil {
+			return infraerrors.BadRequest("USAGE_CLEANUP_INVALID_RETENTION", err.Error())
+		}
+		return nil
 	}
 	maxDays := s.maxRangeDays()
 	if maxDays > 0 {
@@ -351,6 +364,7 @@ func sanitizeUsageCleanupFilters(filters *UsageCleanupFilters) {
 	if filters == nil {
 		return
 	}
+	filters.RetentionUnit = strings.ToLower(strings.TrimSpace(filters.RetentionUnit))
 	if filters.UserID != nil && *filters.UserID <= 0 {
 		filters.UserID = nil
 	}

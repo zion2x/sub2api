@@ -49,7 +49,11 @@ export interface UsageCleanupFilters {
   request_type?: UsageRequestType | null
   stream?: boolean | null
   billing_type?: number | null
+  retention_value?: number
+  retention_unit?: UsageRetentionUnit
 }
+
+export type UsageRetentionUnit = 'day' | 'week' | 'month'
 
 export interface UsageCleanupTask {
   id: number
@@ -67,8 +71,10 @@ export interface UsageCleanupTask {
 }
 
 export interface CreateUsageCleanupTaskRequest {
-  start_date: string
-  end_date: string
+  start_date?: string
+  end_date?: string
+  retention_value?: number
+  retention_unit?: UsageRetentionUnit
   user_id?: number
   api_key_id?: number
   account_id?: number

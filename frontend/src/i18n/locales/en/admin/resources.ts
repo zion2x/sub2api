@@ -565,6 +565,19 @@ export default {
       cleanup: {
         button: 'Cleanup',
         title: 'Cleanup Usage Records',
+        modeLabel: 'Cleanup mode',
+        retentionMode: 'Keep recent records',
+        rangeMode: 'Specific date range',
+        retentionLabel: 'Request detail retention',
+        retentionHint: 'Keep the most recent {value} {unit}; older request details will be deleted. This runs once.',
+        confirmRetentionMessage: 'Delete request details older than the most recent {value} {unit}? This action cannot be undone.',
+        retentionTaskRange: 'Keep recent {value} {unit} (delete through {cutoff})',
+        invalidRetention: 'Enter an integer between 1 and {max}',
+        units: {
+          day: 'day(s)',
+          week: 'week(s)',
+          month: 'month(s)'
+        },
         warning: 'Cleanup is irreversible and will affect historical stats.',
         submit: 'Submit Cleanup',
         submitting: 'Submitting...',

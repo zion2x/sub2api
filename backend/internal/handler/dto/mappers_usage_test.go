@@ -58,7 +58,9 @@ func TestUsageCleanupTaskFromService_RequestTypeMapping(t *testing.T) {
 		ID:     1,
 		Status: service.UsageCleanupStatusPending,
 		Filters: service.UsageCleanupFilters{
-			RequestType: &requestType,
+			RequestType:    &requestType,
+			RetentionValue: 2,
+			RetentionUnit:  service.UsageRetentionUnitWeek,
 		},
 	}
 
@@ -66,6 +68,8 @@ func TestUsageCleanupTaskFromService_RequestTypeMapping(t *testing.T) {
 	require.NotNil(t, dtoTask)
 	require.NotNil(t, dtoTask.Filters.RequestType)
 	require.Equal(t, "stream", *dtoTask.Filters.RequestType)
+	require.Equal(t, 2, dtoTask.Filters.RetentionValue)
+	require.Equal(t, service.UsageRetentionUnitWeek, dtoTask.Filters.RetentionUnit)
 }
 
 func TestRequestTypeStringPtrNil(t *testing.T) {
