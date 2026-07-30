@@ -625,7 +625,7 @@ func lockAndMergeAccountProbeExtra(ctx context.Context, client *dbent.Client, ac
 		delete(extra, key)
 	}
 	probeExplicitlyDisabled := false
-	probeAccount := account.Platform == service.PlatformOpenAI && account.Type == service.AccountTypeAPIKey
+	probeAccount := service.IsUpstreamBillingProbeAccount(account)
 	if probeAccount && explicitProbeEnabled != nil {
 		extra[service.UpstreamBillingProbeEnabledExtraKey] = *explicitProbeEnabled
 		probeExplicitlyDisabled = !*explicitProbeEnabled
@@ -812,7 +812,9 @@ func (r *accountRepository) accountListFilteredQuery(platform, accountType, stat
 	if platform != "" {
 		q = q.Where(dbaccount.PlatformEQ(platform))
 	}
-	if accountType != "" {
+	if accountType == service.AccountListTypeNonOAuth {
+		q = q.Where(dbaccount.TypeNotIn(service.AccountTypeOAuth, service.AccountTypeSetupToken))
+	} else if accountType != "" {
 		q = q.Where(dbaccount.TypeEQ(accountType))
 	}
 	if status != "" {
@@ -877,7 +879,22 @@ func (r *accountRepository) accountListFilteredQuery(platform, accountType, stat
 		}
 	}
 	if search != "" {
-		q = q.Where(dbaccount.NameContainsFold(search))
+		if accountType == service.AccountListTypeNonOAuth {
+			q = q.Where(dbaccount.Or(
+				dbaccount.NameContainsFold(search),
+				dbpredicate.Account(func(s *entsql.Selector) {
+					s.Where(entsql.P(func(b *entsql.Builder) {
+						b.WriteString("STRPOS(LOWER(COALESCE(").
+							Ident(s.C(dbaccount.FieldCredentials)).
+							WriteString(" ->> 'base_url', '')), LOWER(").
+							Arg(search).
+							WriteString(")) > 0")
+					}))
+				}),
+			))
+		} else {
+			q = q.Where(dbaccount.NameContainsFold(search))
+		}
 	}
 	if groupID == service.AccountListGroupUngrouped {
 		q = q.Where(dbaccount.Not(dbaccount.HasAccountGroups()))
@@ -2838,8 +2855,8 @@ func (r *accountRepository) BulkUpdate(ctx context.Context, ids []int64, updates
 	args = append(args, pq.Array(ids))
 	idx++
 	if updates.ProbeEnabled != nil {
-		whereClause += " AND platform = $" + itoa(idx) + " AND type = $" + itoa(idx+1)
-		args = append(args, service.PlatformOpenAI, service.AccountTypeAPIKey)
+		whereClause += " AND type NOT IN ($" + itoa(idx) + ", $" + itoa(idx+1) + ")"
+		args = append(args, service.AccountTypeOAuth, service.AccountTypeSetupToken)
 	}
 	query := "UPDATE accounts SET " + joinClauses(setClauses, ", ") + whereClause
 
@@ -3381,9 +3398,10 @@ func (r *accountRepository) ListDueUpstreamBillingProbeAccounts(ctx context.Cont
 			FROM accounts
 			WHERE deleted_at IS NULL
 				AND status = 'active'
-				AND platform = 'openai'
-				AND type = 'apikey'
-				AND extra @> '{"upstream_billing_probe_enabled": true}'::jsonb
+				AND type NOT IN ('oauth', 'setup-token')
+				AND extra -> 'upstream_billing_probe_enabled' IS DISTINCT FROM 'false'::jsonb
+				AND NULLIF(BTRIM(credentials ->> 'api_key'), '') IS NOT NULL
+				AND NULLIF(BTRIM(credentials ->> 'base_url'), '') IS NOT NULL
 		), parsed AS MATERIALIZED (
 			SELECT
 				id,

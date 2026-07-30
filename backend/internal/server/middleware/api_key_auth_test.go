@@ -1218,7 +1218,7 @@ func TestAPIKeyAuthTouchesLastUsedInStandardMode(t *testing.T) {
 	require.Equal(t, 1, touchCalls)
 }
 
-func TestAPIKeyAuthBillingInfoSkipsBillingAndSideEffects(t *testing.T) {
+func TestAPIKeyAuthKeyInfoEndpointsSkipBillingAndSideEffects(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
 	group := &service.Group{
@@ -1273,14 +1273,18 @@ func TestAPIKeyAuthBillingInfoSkipsBillingAndSideEffects(t *testing.T) {
 	t.Cleanup(subscriptionService.Stop)
 	router := newAuthTestRouter(apiKeyService, subscriptionService, cfg)
 
-	w := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodGet, "/v1/sub2api/billing", nil)
-	req.Header.Set("x-api-key", apiKey.Key)
-	router.ServeHTTP(w, req)
+	for _, path := range []string{"/v1/sub2api/billing", "/v1/sub2api/upstream-info"} {
+		t.Run(path, func(t *testing.T) {
+			w := httptest.NewRecorder()
+			req := httptest.NewRequest(http.MethodGet, path, nil)
+			req.Header.Set("x-api-key", apiKey.Key)
+			router.ServeHTTP(w, req)
 
-	require.Equal(t, http.StatusOK, w.Code)
-	require.Zero(t, subscriptionCalls)
-	require.Zero(t, touchCalls)
+			require.Equal(t, http.StatusOK, w.Code)
+			require.Zero(t, subscriptionCalls)
+			require.Zero(t, touchCalls)
+		})
+	}
 }
 
 func TestAPIKeyAuthBillingInfoSkipsLastUsedInSimpleMode(t *testing.T) {
@@ -1510,6 +1514,7 @@ func newAuthTestRouter(apiKeyService *service.APIKeyService, subscriptionService
 	router.POST("/v1/messages", ok)
 	router.GET("/v1/usage", ok)
 	router.GET("/v1/sub2api/billing", ok)
+	router.GET("/v1/sub2api/upstream-info", ok)
 	return router
 }
 

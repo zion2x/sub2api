@@ -434,6 +434,21 @@ func (s *AccountRepoSuite) TestListWithFilters() {
 			},
 		},
 		{
+			name: "filter_by_non_oauth_upstream_view",
+			setup: func(client *dbent.Client) {
+				mustCreateAccount(s.T(), client, &service.Account{Name: "oauth", Type: service.AccountTypeOAuth})
+				mustCreateAccount(s.T(), client, &service.Account{Name: "setup-token", Type: service.AccountTypeSetupToken})
+				mustCreateAccount(s.T(), client, &service.Account{Name: "api-key", Type: service.AccountTypeAPIKey})
+				mustCreateAccount(s.T(), client, &service.Account{Name: "bedrock", Type: service.AccountTypeBedrock})
+			},
+			accType:   service.AccountListTypeNonOAuth,
+			wantCount: 2,
+			validate: func(accounts []service.Account) {
+				types := []string{accounts[0].Type, accounts[1].Type}
+				s.ElementsMatch([]string{service.AccountTypeAPIKey, service.AccountTypeBedrock}, types)
+			},
+		},
+		{
 			name: "filter_by_status",
 			setup: func(client *dbent.Client) {
 				mustCreateAccount(s.T(), client, &service.Account{Name: "s1", Status: service.StatusActive})
@@ -550,6 +565,32 @@ func (s *AccountRepoSuite) TestListWithFilters() {
 			wantCount: 1,
 			validate: func(accounts []service.Account) {
 				s.Require().Contains(accounts[0].Name, "alpha")
+			},
+		},
+		{
+			name: "filter_non_oauth_upstream_by_base_url",
+			setup: func(client *dbent.Client) {
+				mustCreateAccount(s.T(), client, &service.Account{
+					Name:        "matching-upstream",
+					Type:        service.AccountTypeAPIKey,
+					Credentials: map[string]any{"base_url": "https://Gateway.Example.com/v1"},
+				})
+				mustCreateAccount(s.T(), client, &service.Account{
+					Name:        "other-upstream",
+					Type:        service.AccountTypeAPIKey,
+					Credentials: map[string]any{"base_url": "https://other.example.com/v1"},
+				})
+				mustCreateAccount(s.T(), client, &service.Account{
+					Name:        "oauth-with-matching-url",
+					Type:        service.AccountTypeOAuth,
+					Credentials: map[string]any{"base_url": "https://gateway.example.com/v1"},
+				})
+			},
+			accType:   service.AccountListTypeNonOAuth,
+			search:    "gateway.example",
+			wantCount: 1,
+			validate: func(accounts []service.Account) {
+				s.Require().Equal("matching-upstream", accounts[0].Name)
 			},
 		},
 		{

@@ -222,14 +222,14 @@ func TestUpstreamBillingProbeSettingsDefaultsAndValidation(t *testing.T) {
 	settings, err := settingsService.GetUpstreamBillingProbeSettings(context.Background())
 	require.NoError(t, err)
 	require.True(t, settings.Enabled)
-	require.Equal(t, 30, settings.IntervalMinutes)
+	require.Equal(t, 1, settings.IntervalMinutes)
 
 	err = settingsService.SetUpstreamBillingProbeSettings(context.Background(), &UpstreamBillingProbeSettings{
 		Enabled:         false,
-		IntervalMinutes: 4,
+		IntervalMinutes: 0,
 	})
 	require.Error(t, err)
-	require.Contains(t, err.Error(), "interval_minutes must be between 5 and 1440")
+	require.Contains(t, err.Error(), "interval_minutes must be between 1 and 1440")
 
 	err = settingsService.SetUpstreamBillingProbeSettings(context.Background(), &UpstreamBillingProbeSettings{
 		Enabled:         false,
@@ -250,7 +250,7 @@ func TestUpstreamBillingProbeSettingsDefaultsAndValidation(t *testing.T) {
 	settings, err = settingsService.GetUpstreamBillingProbeSettings(context.Background())
 	require.NoError(t, err)
 	require.False(t, settings.Enabled)
-	require.Equal(t, 30, settings.IntervalMinutes)
+	require.Equal(t, 1, settings.IntervalMinutes)
 
 	repo.values[SettingKeyUpstreamBillingProbeSettings] = `{"enabled":`
 	settings, err = settingsService.GetUpstreamBillingProbeSettings(context.Background())
@@ -304,10 +304,9 @@ func TestUpstreamBillingProbeSuccessPersistsSanitizedSnapshot(t *testing.T) {
 	require.NotNil(t, snapshot.ReceivedAt)
 	require.Equal(t, fixedNow, *snapshot.ReceivedAt)
 	require.NotNil(t, snapshot.FreshUntil)
-	require.Equal(t, fixedNow.Add(time.Hour), *snapshot.FreshUntil)
-	require.False(t, snapshot.NextProbeAt.Before(fixedNow.Add(24*time.Minute)))
-	require.False(t, snapshot.NextProbeAt.After(fixedNow.Add(36*time.Minute)))
-	require.Equal(t, "https://upstream.example/v1/sub2api/billing", upstream.lastReq.URL.String())
+	require.Equal(t, fixedNow.Add(2*time.Minute), *snapshot.FreshUntil)
+	require.Equal(t, fixedNow.Add(time.Minute), snapshot.NextProbeAt)
+	require.Equal(t, "https://upstream.example/v1/sub2api/upstream-info", upstream.lastReq.URL.String())
 	require.Equal(t, http.MethodGet, upstream.lastReq.Method)
 	require.Equal(t, "Bearer sk-sensitive", upstream.lastReq.Header.Get("Authorization"))
 	require.True(t, HTTPUpstreamRedirectsDisabled(upstream.lastReq.Context()))
@@ -329,6 +328,158 @@ func TestUpstreamBillingProbeRejectsMissingRequiredMultiplier(t *testing.T) {
 	}`))
 
 	require.ErrorContains(t, err, "incomplete billing response")
+}
+
+func TestParseSub2APIUpstreamInfoResponse(t *testing.T) {
+	data, err := parseSub2APIUpstreamInfoResponse([]byte(`{
+		"object":"sub2api.upstream_info",
+		"schema_version":1,
+		"provider":"sub2api",
+		"balance":12.5,
+		"currency":"USD",
+		"key_quota":20,
+		"key_quota_used":6,
+		"key_quota_remaining":14,
+		"group_check_supported":true,
+		"remote_group_id":42,
+		"remote_group_name":"paid-openai",
+		"remote_group_exists":true,
+		"remote_group_status":"active",
+		"group_rate_multiplier":0.8,
+		"resolved_rate_multiplier":0.8,
+		"peak_rate_enabled":false,
+		"effective_rate_multiplier":0.8,
+		"observed_at":"2026-07-13T01:00:00Z",
+		"secret":"must-not-persist"
+	}`))
+
+	require.NoError(t, err)
+	require.Equal(t, "sub2api", data["provider"])
+	require.Equal(t, 12.5, data["balance"])
+	require.Equal(t, int64(42), data["remote_group_id"])
+	require.Equal(t, "paid-openai", data["remote_group_name"])
+	require.Equal(t, true, data["remote_group_exists"])
+	require.Equal(t, 0.8, data["effective_rate_multiplier"])
+	require.NotContains(t, data, "secret")
+}
+
+func TestUpstreamBillingProbeDetectsNewAPIAndChecksGroup(t *testing.T) {
+	account := &Account{
+		ID:          171,
+		Platform:    PlatformAnthropic,
+		Type:        AccountTypeAPIKey,
+		Status:      StatusActive,
+		Concurrency: 1,
+		Credentials: map[string]any{
+			"api_key":                    "sk-newapi",
+			"base_url":                   "https://newapi.example/v1",
+			credKeyHeaderOverrideEnabled: true,
+			credKeyHeaderOverrides:       map[string]any{"x-tenant": "tenant-a"},
+		},
+	}
+	repo := &upstreamBillingProbeAccountRepo{accounts: map[int64]*Account{account.ID: account}}
+	response := func(status int, body string) *http.Response {
+		return &http.Response{StatusCode: status, Header: http.Header{}, Body: io.NopCloser(strings.NewReader(body))}
+	}
+	upstream := &httpUpstreamRecorder{responses: []*http.Response{
+		response(http.StatusNotFound, `{"message":"not found"}`),
+		response(http.StatusNotFound, `{"message":"not found"}`),
+		response(http.StatusOK, `{"code":true,"message":"ok","data":{"object":"token_usage","name":"upstream-key","total_granted":2000000,"total_available":1250000,"total_used":750000,"unlimited_quota":false}}`),
+		response(http.StatusOK, `{"success":true,"data":{"quota_per_unit":500000,"quota_display_type":"USD","usd_exchange_rate":7.2}}`),
+		response(http.StatusOK, `{"object":"list","data":[]}`),
+	}}
+	svc := newUpstreamBillingProbeTestService(repo, upstream, &upstreamBillingProbeSettingRepo{})
+	fixedNow := time.Date(2026, time.July, 13, 2, 0, 0, 0, time.UTC)
+	svc.now = func() time.Time { return fixedNow }
+
+	snapshot, err := svc.ProbeAccount(context.Background(), account.ID)
+
+	require.NoError(t, err)
+	require.Equal(t, UpstreamBillingProbeStatusOK, snapshot.Status)
+	require.Equal(t, "newapi", snapshot.Data["provider"])
+	require.Equal(t, 2.5, snapshot.Data["balance"])
+	require.Equal(t, "USD", snapshot.Data["currency"])
+	require.Equal(t, 2000000.0, snapshot.Data["key_quota"])
+	require.Equal(t, 750000.0, snapshot.Data["key_quota_used"])
+	require.Equal(t, 1250000.0, snapshot.Data["key_quota_remaining"])
+	require.Equal(t, 500000.0, snapshot.Data["quota_per_unit"])
+	require.Equal(t, true, snapshot.Data["group_check_supported"])
+	require.Equal(t, true, snapshot.Data["group_routing_healthy"])
+	require.NotContains(t, snapshot.Data, "remote_group_name")
+	require.NotContains(t, snapshot.Data, "remote_group_exists")
+	require.NotContains(t, snapshot.Data, "effective_rate_multiplier")
+	require.Len(t, upstream.requests, 5)
+	require.Equal(t, "https://newapi.example/api/usage/token/", upstream.requests[2].URL.String())
+	require.Equal(t, "Bearer sk-newapi", upstream.requests[2].Header.Get("Authorization"))
+	require.Equal(t, "https://newapi.example/api/status", upstream.requests[3].URL.String())
+	require.Empty(t, upstream.requests[3].Header.Get("Authorization"))
+	require.Equal(t, "tenant-a", getHeaderRaw(upstream.requests[3].Header, "x-tenant"))
+	require.Equal(t, "https://newapi.example/v1/models", upstream.requests[4].URL.String())
+	require.Equal(t, "Bearer sk-newapi", upstream.requests[4].Header.Get("Authorization"))
+}
+
+func TestParseNewAPIUsageResponseRejectsCodeFalse(t *testing.T) {
+	_, err := parseNewAPIUsageResponse(
+		[]byte(`{"code":false,"message":"invalid token"}`),
+		time.Date(2026, time.July, 13, 2, 0, 0, 0, time.UTC),
+	)
+
+	require.ErrorContains(t, err, "newapi usage request failed")
+}
+
+func TestNewAPIGroupCheckDistinguishesMissingAndForbidden(t *testing.T) {
+	tests := []struct {
+		name              string
+		body              string
+		wantStatus        string
+		wantExistsPresent bool
+	}{
+		{name: "missing", body: `{"message":"group default has been deprecated"}`, wantStatus: "missing", wantExistsPresent: true},
+		{name: "forbidden", body: `{"message":"no access to group default"}`, wantStatus: "forbidden", wantExistsPresent: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			account := &Account{ID: 173, Concurrency: 1}
+			upstream := &httpUpstreamRecorder{resp: &http.Response{
+				StatusCode: http.StatusForbidden,
+				Header:     http.Header{},
+				Body:       io.NopCloser(strings.NewReader(tt.body)),
+			}}
+			svc := newUpstreamBillingProbeTestService(
+				&upstreamBillingProbeAccountRepo{},
+				upstream,
+				&upstreamBillingProbeSettingRepo{},
+			)
+			data := map[string]any{"group_check_supported": false}
+
+			svc.enrichNewAPIGroupCheck(context.Background(), account, "", nil, "sk-test", "https://newapi.example/v1", data)
+
+			require.Equal(t, true, data["group_check_supported"])
+			require.Equal(t, false, data["group_routing_healthy"])
+			require.Equal(t, tt.wantStatus, data["remote_group_status"])
+			_, existsPresent := data["remote_group_exists"]
+			require.Equal(t, tt.wantExistsPresent, existsPresent)
+		})
+	}
+}
+
+func TestUpstreamBillingProbeScheduledAccountDefaultsEnabled(t *testing.T) {
+	account := &Account{
+		ID:          172,
+		Platform:    PlatformAnthropic,
+		Type:        AccountTypeAPIKey,
+		Status:      StatusActive,
+		Concurrency: 1,
+		Credentials: map[string]any{"api_key": "sk-test", "base_url": "https://upstream.example"},
+	}
+	baseRepo := &upstreamBillingProbeAccountRepo{accounts: map[int64]*Account{account.ID: account}}
+	repo := &staleDueUpstreamBillingProbeAccountRepo{upstreamBillingProbeAccountRepo: baseRepo, due: []Account{*account}}
+	upstream := &upstreamBillingProbeHTTPStub{}
+	svc := newUpstreamBillingProbeTestService(repo, upstream, &upstreamBillingProbeSettingRepo{})
+
+	require.NoError(t, svc.RunDue(context.Background()))
+	require.Equal(t, int64(1), upstream.calls.Load())
 }
 
 func TestUpstreamBillingProbeDiscardsResultWhenIdentityChangesInFlight(t *testing.T) {
@@ -487,7 +638,7 @@ func TestUpstreamBillingProbeFailurePreservesLastSuccessAndRetryAfter(t *testing
 	require.Equal(t, previous.Data, snapshot.Data)
 	require.Equal(t, previous.ReceivedAt, snapshot.ReceivedAt)
 	require.NotNil(t, snapshot.FreshUntil)
-	require.Equal(t, receivedAt.Add(time.Hour), *snapshot.FreshUntil)
+	require.Equal(t, receivedAt.Add(2*time.Minute), *snapshot.FreshUntil)
 	require.Equal(t, 2, snapshot.FailureCount)
 	require.Equal(t, "http_error", snapshot.LastError)
 	require.False(t, snapshot.NextProbeAt.Before(fixedNow.Add(4*time.Hour)))
@@ -517,14 +668,12 @@ func TestUpstreamBillingProbeEmptyResponseIsPersistedAsFailure(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, UpstreamBillingProbeStatusFailed, snapshot.Status)
 	require.Equal(t, "empty_response", snapshot.LastError)
-	require.False(t, snapshot.NextProbeAt.Before(fixedNow.Add(24*time.Minute)))
-	require.False(t, snapshot.NextProbeAt.After(fixedNow.Add(36*time.Minute)))
+	require.Equal(t, fixedNow.Add(time.Minute), snapshot.NextProbeAt)
 
 	snapshot, err = svc.ProbeAccount(context.Background(), account.ID)
 	require.NoError(t, err)
 	require.Equal(t, 2, snapshot.FailureCount)
-	require.False(t, snapshot.NextProbeAt.Before(fixedNow.Add(24*time.Minute)))
-	require.False(t, snapshot.NextProbeAt.After(fixedNow.Add(36*time.Minute)))
+	require.Equal(t, fixedNow.Add(time.Minute), snapshot.NextProbeAt)
 }
 
 func TestUpstreamBillingProbeUnsupportedAndAccountToggle(t *testing.T) {
@@ -552,14 +701,12 @@ func TestUpstreamBillingProbeUnsupportedAndAccountToggle(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, UpstreamBillingProbeStatusUnsupported, snapshot.Status)
 	require.Equal(t, "unsupported", snapshot.LastError)
-	require.False(t, snapshot.NextProbeAt.Before(fixedNow.Add(24*time.Minute)))
-	require.False(t, snapshot.NextProbeAt.After(fixedNow.Add(36*time.Minute)))
+	require.Equal(t, fixedNow.Add(time.Minute), snapshot.NextProbeAt)
 
 	snapshot, err = svc.ProbeAccount(context.Background(), account.ID)
 	require.NoError(t, err)
 	require.Equal(t, 2, snapshot.FailureCount)
-	require.False(t, snapshot.NextProbeAt.Before(fixedNow.Add(24*time.Minute)))
-	require.False(t, snapshot.NextProbeAt.After(fixedNow.Add(36*time.Minute)))
+	require.Equal(t, fixedNow.Add(time.Minute), snapshot.NextProbeAt)
 
 	invalid := &Account{ID: 20, Platform: PlatformOpenAI, Type: AccountTypeOAuth}
 	repo.accounts[invalid.ID] = invalid
@@ -567,7 +714,7 @@ func TestUpstreamBillingProbeUnsupportedAndAccountToggle(t *testing.T) {
 	require.True(t, errors.Is(err, ErrUpstreamBillingProbeAccountInvalid))
 }
 
-func TestUpstreamBillingProbeRunnerIsBoundedAndManualProbeIgnoresSwitches(t *testing.T) {
+func TestUpstreamBillingProbeRunnerRefreshesPoolAndManualProbeIgnoresSwitches(t *testing.T) {
 	accounts := make(map[int64]*Account, 25)
 	for id := int64(1); id <= 25; id++ {
 		accounts[id] = &Account{
@@ -589,19 +736,19 @@ func TestUpstreamBillingProbeRunnerIsBoundedAndManualProbeIgnoresSwitches(t *tes
 	svc.now = func() time.Time { return time.Date(2026, time.July, 13, 2, 0, 0, 0, time.UTC) }
 
 	require.NoError(t, svc.RunDue(context.Background()))
-	require.Equal(t, int64(20), upstream.calls.Load())
+	require.Equal(t, int64(25), upstream.calls.Load())
 
 	settingsRepo.mu.Lock()
 	settingsRepo.values[SettingKeyUpstreamBillingProbeSettings] = `{"enabled":false,"interval_minutes":30}`
 	settingsRepo.mu.Unlock()
 	require.NoError(t, svc.RunDue(context.Background()))
-	require.Equal(t, int64(20), upstream.calls.Load())
+	require.Equal(t, int64(25), upstream.calls.Load())
 
 	accounts[25].Extra[UpstreamBillingProbeEnabledExtraKey] = false
 	snapshot, err := svc.ProbeAccount(context.Background(), 25)
 	require.NoError(t, err)
 	require.Equal(t, UpstreamBillingProbeStatusOK, snapshot.Status)
-	require.Equal(t, int64(21), upstream.calls.Load())
+	require.Equal(t, int64(26), upstream.calls.Load())
 }
 
 func TestUpstreamBillingProbeRunnerRechecksEnabledAfterDueSelection(t *testing.T) {
@@ -712,6 +859,10 @@ func TestUpstreamBillingProbeLeaderLockFailsClosedOnCacheError(t *testing.T) {
 	require.ErrorIs(t, err, context.DeadlineExceeded)
 	require.False(t, acquired)
 	require.Nil(t, release)
+}
+
+func TestUpstreamBillingProbeLeaderLockTTLCoversLargestBatch(t *testing.T) {
+	require.Greater(t, upstreamBillingProbeLeaderLockTTL, upstreamBillingProbeMaxBatchRuntime)
 }
 
 func TestUpstreamBillingProbeLeaderLockUsesCadenceBuckets(t *testing.T) {

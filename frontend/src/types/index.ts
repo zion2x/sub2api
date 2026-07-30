@@ -941,20 +941,38 @@ export interface TempUnschedulableStatus {
 }
 
 export interface UpstreamBillingData {
-  object: 'sub2api.key_billing'
+  object: 'sub2api.key_billing' | 'sub2api.upstream_info' | 'newapi.token_usage'
   schema_version: 1
-  billing_scope: 'token'
-  group_rate_multiplier: number
+  billing_scope?: 'token'
+  group_rate_multiplier?: number
   user_rate_multiplier?: number
-  resolved_rate_multiplier: number
-  peak_rate_enabled: boolean
+  resolved_rate_multiplier?: number
+  peak_rate_enabled?: boolean
   peak_start?: string
   peak_end?: string
   peak_rate_multiplier?: number
   applied_peak_multiplier?: number
-  effective_rate_multiplier: number
+  effective_rate_multiplier?: number
   timezone?: string
   observed_at: string
+  provider?: 'sub2api' | 'newapi'
+  balance?: number
+  currency?: string
+  key_quota?: number
+  key_quota_used?: number
+  key_quota_remaining?: number
+  total_granted?: number
+  total_used?: number
+  unlimited_quota?: boolean
+  quota_per_unit?: number
+  quota_display_type?: string
+  usd_exchange_rate?: number
+  group_check_supported?: boolean
+  group_routing_healthy?: boolean
+  remote_group_id?: string | number
+  remote_group_name?: string
+  remote_group_exists?: boolean
+  remote_group_status?: string
 }
 
 export type UpstreamBillingProbeStatus = 'ok' | 'unsupported' | 'failed'
@@ -969,6 +987,16 @@ export interface UpstreamBillingProbeSnapshot {
   failure_count?: number
   http_status?: number
   last_error?: string
+  provider?: 'sub2api' | 'newapi'
+  balance?: number
+  currency?: string
+  remote_group_id?: string | number
+  remote_group_name?: string
+  remote_group_exists?: boolean
+  group_routing_healthy?: boolean
+  group_rate_multiplier?: number
+  effective_rate_multiplier?: number
+  observed_at?: string
 }
 
 export interface UpstreamBillingProbeSettings {

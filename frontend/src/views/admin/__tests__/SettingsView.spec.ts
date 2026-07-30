@@ -54,7 +54,7 @@ const {
   getBetaPolicySettings: vi.fn(),
   getUpstreamBillingProbeSettings: vi.fn().mockResolvedValue({
     enabled: true,
-    interval_minutes: 30,
+    interval_minutes: 1,
   }),
   updateUpstreamBillingProbeSettings: vi.fn().mockImplementation(async (payload) => payload),
   getOllamaCloudUsageSettings: vi.fn().mockResolvedValue({
@@ -222,7 +222,7 @@ vi.mock("vue-i18n", async () => {
     "admin.settings.upstreamBillingProbe.enabled": "启用全局自动探测",
     "admin.settings.upstreamBillingProbe.enabledHint": "开启后，仅对账号自身已启用自动检测的账号执行定时探测。",
     "admin.settings.upstreamBillingProbe.intervalMinutes": "探测周期（分钟）",
-    "admin.settings.upstreamBillingProbe.intervalHint": "范围 5–1440 分钟。",
+    "admin.settings.upstreamBillingProbe.intervalHint": "范围 1–1440 分钟。",
     "admin.settings.upstreamBillingProbe.saved": "上游倍率自动探测设置已保存",
     "admin.settings.upstreamBillingProbe.saveFailed": "保存上游倍率自动探测设置失败",
     "admin.settings.site.uploadImage": "上传图片",
@@ -658,7 +658,7 @@ describe("admin SettingsView payment visible method controls", () => {
     });
     getUpstreamBillingProbeSettings.mockResolvedValue({
       enabled: true,
-      interval_minutes: 30,
+      interval_minutes: 1,
     });
     updateUpstreamBillingProbeSettings.mockImplementation(async (payload) => payload);
     getOllamaCloudUsageSettings.mockResolvedValue({
@@ -1078,13 +1078,14 @@ describe("admin SettingsView payment visible method controls", () => {
     expect(card.find('[data-testid="upstream-billing-probe-interval"]').exists()).toBe(false);
 
     await card.get('[data-testid="upstream-billing-probe-enabled"]').setValue(true);
-    await card.get('[data-testid="upstream-billing-probe-interval"]').setValue(60);
+    expect(card.get('[data-testid="upstream-billing-probe-interval"]').attributes('min')).toBe('1');
+    await card.get('[data-testid="upstream-billing-probe-interval"]').setValue(1);
     await card.get('[data-testid="upstream-billing-probe-save"]').trigger("click");
     await flushPromises();
 
     expect(updateUpstreamBillingProbeSettings).toHaveBeenCalledWith({
       enabled: true,
-      interval_minutes: 60,
+      interval_minutes: 1,
     });
     expect(showSuccess).toHaveBeenCalledWith("上游倍率自动探测设置已保存");
   });

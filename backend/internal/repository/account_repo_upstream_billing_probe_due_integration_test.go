@@ -31,8 +31,8 @@ func TestListDueUpstreamBillingProbeAccountsHandlesInvalidCalendarDate(t *testin
 			"upstream_billing_probe": {"status": "ok", "next_probe_at": %q}
 		}`, nextProbeAt)
 		err := scanSingleRow(ctx, tx, `
-			INSERT INTO accounts (name, platform, type, status, extra)
-			VALUES ($1, 'openai', $2, 'active', $3::jsonb)
+			INSERT INTO accounts (name, platform, type, status, credentials, extra)
+			VALUES ($1, 'openai', $2, 'active', '{"api_key":"sk-test","base_url":"https://upstream.example"}'::jsonb, $3::jsonb)
 			RETURNING id
 		`, []any{name, service.AccountTypeAPIKey, extra}, &id)
 		require.NoError(t, err)
@@ -58,8 +58,8 @@ func insertUpstreamBillingProbeAccount(ctx context.Context, t *testing.T, tx sql
 		"upstream_billing_probe": {"status": "ok", "next_probe_at": %q}
 	}`, nextProbeAt)
 	err := scanSingleRow(ctx, tx, `
-		INSERT INTO accounts (name, platform, type, status, extra)
-		VALUES ($1, 'openai', $2, 'active', $3::jsonb)
+		INSERT INTO accounts (name, platform, type, status, credentials, extra)
+		VALUES ($1, 'openai', $2, 'active', '{"api_key":"sk-test","base_url":"https://upstream.example"}'::jsonb, $3::jsonb)
 		RETURNING id
 	`, []any{name, service.AccountTypeAPIKey, extra}, &id)
 	require.NoError(t, err)

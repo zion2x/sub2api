@@ -134,6 +134,21 @@ async function submitApiKeyAccount(
   return wrapper
 }
 
+async function submitAntigravityUpstream(disableUpstreamBillingProbe = false) {
+  const wrapper = mountModal()
+  await selectButtonByText(wrapper, 'Antigravity')
+  await selectButtonByText(wrapper, 'admin.accounts.types.antigravityApikey')
+  await wrapper.get('form#create-account-form input[type="text"]').setValue('Antigravity upstream')
+  await wrapper.get('input[placeholder="https://cloudcode-pa.googleapis.com"]').setValue('https://upstream.example')
+  await wrapper.get('input[placeholder="sk-..."]').setValue('test-api-key')
+  if (disableUpstreamBillingProbe) {
+    await wrapper.get('[data-testid="upstream-billing-auto-probe"]').trigger('click')
+  }
+  await wrapper.get('form#create-account-form').trigger('submit.prevent')
+  await flushPromises()
+  return wrapper
+}
+
 async function openCodexImportStep(toggleClicks = 0) {
   const wrapper = mountModal()
   await selectButtonByText(wrapper, 'OpenAI')
@@ -234,12 +249,32 @@ describe('CreateAccountModal OpenAI long-context billing', () => {
     expect(createAccountMock.mock.calls[0]?.[0]?.extra?.openai_long_context_billing_enabled).toBe(true)
   })
 
-  it('omits the OpenAI setting for non-OpenAI account creation', async () => {
+  it('enables upstream probing without adding OpenAI-only settings for an Anthropic API key', async () => {
     await submitApiKeyAccount('anthropic')
 
     expect(createAccountMock).toHaveBeenCalledTimes(1)
     expect(createAccountMock.mock.calls[0]?.[0]?.extra?.openai_long_context_billing_enabled).toBeUndefined()
-    expect(createAccountMock.mock.calls[0]?.[0]?.upstream_billing_probe_enabled).toBeUndefined()
+    expect(createAccountMock.mock.calls[0]?.[0]?.upstream_billing_probe_enabled).toBe(true)
+    expect(probeUpstreamBillingMock).toHaveBeenCalledWith(42)
+  })
+
+  it('enables immediate upstream probing for Antigravity API key accounts', async () => {
+    await submitAntigravityUpstream()
+
+    expect(createAccountMock).toHaveBeenCalledTimes(1)
+    expect(createAccountMock.mock.calls[0]?.[0]).toMatchObject({
+      platform: 'antigravity',
+      type: 'apikey',
+      upstream_billing_probe_enabled: true,
+    })
+    expect(probeUpstreamBillingMock).toHaveBeenCalledWith(42)
+  })
+
+  it('lets Antigravity API key accounts disable upstream probing', async () => {
+    await submitAntigravityUpstream(true)
+
+    expect(createAccountMock.mock.calls[0]?.[0]?.upstream_billing_probe_enabled).toBe(false)
+    expect(probeUpstreamBillingMock).not.toHaveBeenCalled()
   })
 
   it('leaves Codex session import billing ownership to the backend', async () => {

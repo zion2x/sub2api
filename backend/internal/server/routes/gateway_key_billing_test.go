@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
 	"github.com/Wei-Shaw/sub2api/internal/handler"
@@ -30,6 +31,10 @@ func (r *keyBillingRouteAPIKeyRepo) GetByKeyForAuth(_ context.Context, key strin
 	return &clone, nil
 }
 
+func (r *keyBillingRouteAPIKeyRepo) UpdateLastUsed(_ context.Context, _ int64, _ time.Time) error {
+	return nil
+}
+
 type keyBillingRouteRateRepo struct {
 	service.UserGroupRateRepository
 	lookupCalls int
@@ -45,9 +50,14 @@ func (r *keyBillingRouteRateRepo) GetRPMOverrideByUserAndGroup(context.Context, 
 }
 
 func newKeyBillingRouteTestRouter(runMode string) (*gin.Engine, *keyBillingRouteRateRepo, string) {
+	return newKeyBillingRouteTestRouterWithAPIKey(runMode, nil)
+}
+
+func newKeyBillingRouteTestRouterWithAPIKey(runMode string, mutate func(*service.APIKey)) (*gin.Engine, *keyBillingRouteRateRepo, string) {
 	gin.SetMode(gin.TestMode)
 	group := &service.Group{
 		ID:               42,
+		Name:             "paid-openai",
 		Status:           service.StatusActive,
 		Hydrated:         true,
 		Platform:         service.PlatformOpenAI,
@@ -69,6 +79,9 @@ func newKeyBillingRouteTestRouter(runMode string) (*gin.Engine, *keyBillingRoute
 		User:    user,
 		GroupID: groupID,
 		Group:   apiKeyGroup,
+	}
+	if mutate != nil {
+		mutate(apiKey)
 	}
 	cfg := &config.Config{RunMode: runMode}
 	rateRepo := &keyBillingRouteRateRepo{}
@@ -109,13 +122,18 @@ func newKeyBillingRouteTestRouter(runMode string) (*gin.Engine, *keyBillingRoute
 func TestGatewayRoutesKeyBillingInfoPathIsRegistered(t *testing.T) {
 	router := newGatewayRoutesTestRouter()
 
+	foundBilling := false
+	foundUpstreamInfo := false
 	for _, route := range router.Routes() {
 		if route.Method == http.MethodGet && route.Path == "/v1/sub2api/billing" {
-			return
+			foundBilling = true
+		}
+		if route.Method == http.MethodGet && route.Path == "/v1/sub2api/upstream-info" {
+			foundUpstreamInfo = true
 		}
 	}
-
-	t.Fatal("GET /v1/sub2api/billing should be registered")
+	require.True(t, foundBilling, "GET /v1/sub2api/billing should be registered")
+	require.True(t, foundUpstreamInfo, "GET /v1/sub2api/upstream-info should be registered")
 }
 
 func TestGatewayRoutesKeyBillingInfoEndToEnd(t *testing.T) {
@@ -170,4 +188,51 @@ func TestGatewayRoutesKeyBillingInfoEndToEnd(t *testing.T) {
 		}`, w.Body.String())
 		require.Zero(t, rateRepo.lookupCalls)
 	})
+}
+
+func TestGatewayRoutesKeyUpstreamInfoEndToEnd(t *testing.T) {
+	router, rateRepo, key := newKeyBillingRouteTestRouter(config.RunModeStandard)
+	req := httptest.NewRequest(http.MethodGet, "/v1/sub2api/upstream-info", nil)
+	req.Header.Set("Authorization", "Bearer "+key)
+	w := httptest.NewRecorder()
+
+	router.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code)
+	require.Equal(t, "no-store", w.Header().Get("Cache-Control"))
+	var body map[string]any
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &body))
+	require.Equal(t, "sub2api.upstream_info", body["object"])
+	require.Equal(t, "sub2api", body["provider"])
+	require.Equal(t, 10.0, body["balance"])
+	require.Equal(t, "paid-openai", body["remote_group_name"])
+	require.Equal(t, true, body["remote_group_exists"])
+	require.Equal(t, 0.75, body["group_rate_multiplier"])
+	require.Equal(t, 1, rateRepo.lookupCalls)
+	require.NotContains(t, w.Body.String(), key)
+}
+
+func TestGatewayRoutesKeyUpstreamInfoReportsMissingGroupDespiteBillingGuards(t *testing.T) {
+	expiredAt := time.Now().Add(-time.Hour)
+	router, rateRepo, key := newKeyBillingRouteTestRouterWithAPIKey(config.RunModeStandard, func(apiKey *service.APIKey) {
+		apiKey.Group = nil
+		apiKey.Status = service.StatusAPIKeyQuotaExhausted
+		apiKey.Quota = 1
+		apiKey.QuotaUsed = 1
+		apiKey.ExpiresAt = &expiredAt
+		apiKey.User.Balance = 0
+	})
+	req := httptest.NewRequest(http.MethodGet, "/v1/sub2api/upstream-info", nil)
+	req.Header.Set("Authorization", "Bearer "+key)
+	w := httptest.NewRecorder()
+
+	router.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code)
+	var body map[string]any
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &body))
+	require.Equal(t, false, body["remote_group_exists"])
+	require.Equal(t, 0.0, body["balance"])
+	require.Equal(t, 0.0, body["key_quota_remaining"])
+	require.Zero(t, rateRepo.lookupCalls)
 }

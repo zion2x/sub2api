@@ -854,8 +854,8 @@
         </div>
       </div>
 
-      <!-- Upstream billing auto probe (OpenAI API Key only) -->
-      <div v-if="allOpenAIAPIKey" class="border-t border-gray-200 pt-4 dark:border-dark-600">
+      <!-- Upstream billing auto probe -->
+      <div v-if="allUpstreamAccounts" class="border-t border-gray-200 pt-4 dark:border-dark-600">
         <div class="mb-3 flex items-center justify-between">
           <div class="flex-1 pr-4">
             <label
@@ -1275,6 +1275,7 @@ import {
   resolveOpenAIWSModeConcurrencyHintKey
 } from '@/utils/openaiWsMode'
 import type { OpenAIWSMode } from '@/utils/openaiWsMode'
+import { isUpstreamAccountType } from '@/utils/upstreamAccount'
 interface Props {
   show: boolean
   accountIds: number[]
@@ -1337,6 +1338,13 @@ const allOpenAIAPIKey = computed(() => {
     targetSelectedPlatforms.value[0] === 'openai' &&
     targetSelectedTypes.value.length > 0 &&
     targetSelectedTypes.value.every(t => t === 'apikey')
+  )
+})
+
+const allUpstreamAccounts = computed(() => {
+  return (
+    targetSelectedTypes.value.length > 0 &&
+    targetSelectedTypes.value.every(type => isUpstreamAccountType(type))
   )
 })
 

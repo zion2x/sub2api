@@ -12,6 +12,7 @@ vi.mock('@/api/client', () => ({
 
 import {
   getUpstreamBillingProbeSettings,
+  listUpstreams,
   probeUpstreamBilling,
   probeUpstreamBillingBatch,
   setUpstreamBillingProbeEnabled,
@@ -26,7 +27,7 @@ describe('admin account upstream billing probe API', () => {
   })
 
   it('reads and updates global settings', async () => {
-    const settings = { enabled: true, interval_minutes: 30 }
+    const settings = { enabled: true, interval_minutes: 1 }
     get.mockResolvedValueOnce({ data: settings })
     put.mockResolvedValueOnce({ data: settings })
 
@@ -34,6 +35,23 @@ describe('admin account upstream billing probe API', () => {
     await expect(updateUpstreamBillingProbeSettings(settings)).resolves.toEqual(settings)
     expect(get).toHaveBeenCalledWith('/admin/accounts/upstream-billing-probe/settings')
     expect(put).toHaveBeenCalledWith('/admin/accounts/upstream-billing-probe/settings', settings)
+  })
+
+  it('lists accounts with the non-OAuth virtual filter', async () => {
+    const response = { items: [], total: 0, page: 2, page_size: 50, pages: 0 }
+    get.mockResolvedValueOnce({ data: response })
+
+    await expect(listUpstreams(2, 50, { search: 'newapi', status: 'active' })).resolves.toEqual(response)
+    expect(get).toHaveBeenCalledWith('/admin/accounts', {
+      params: {
+        page: 2,
+        page_size: 50,
+        search: 'newapi',
+        status: 'active',
+        type: 'non_oauth'
+      },
+      signal: undefined
+    })
   })
 
   it('uses dedicated account and batch endpoints', async () => {

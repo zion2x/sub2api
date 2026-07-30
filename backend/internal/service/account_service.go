@@ -18,6 +18,11 @@ var (
 const AccountListGroupUngrouped int64 = -1
 const AccountPrivacyModeUnsetFilter = "__unset__"
 
+// AccountListTypeNonOAuth is a virtual account-list filter used by the
+// upstream management view. Setup tokens share the OAuth credential lifecycle,
+// so they are excluded together with regular OAuth accounts.
+const AccountListTypeNonOAuth = "non_oauth"
+
 // OAuthRefreshPageOptions describes one bounded, cursor-stable scan of OAuth
 // accounts. Candidate platforms are supplied by TokenRefreshService's refresher
 // registry so repository eligibility cannot drift from registered providers.

@@ -68,6 +68,46 @@ describe('UpstreamBillingRateCell', () => {
     vi.useRealTimers()
   })
 
+  it('treats a missing account probe switch as enabled', async () => {
+    const wrapper = mount(UpstreamBillingRateCell, {
+      attachTo: document.body,
+      props: {
+        account: makeAccount({
+          extra: {
+            upstream_billing_probe: {
+              status: 'unsupported',
+              last_attempt_at: '2026-07-13T00:00:00Z',
+              next_probe_at: '2026-07-13T01:00:00Z'
+            }
+          }
+        }),
+        now: Date.now()
+      }
+    })
+
+    await wrapper.get('[data-testid="upstream-billing-details"]').trigger('mouseenter')
+    await flushPromises()
+
+    const tooltips = document.body.querySelectorAll('[role="tooltip"]')
+    const tooltip = tooltips[tooltips.length - 1] as HTMLElement
+    expect(tooltip.querySelector('[data-testid="upstream-billing-probe-state"] span')?.className).toContain('text-emerald-400')
+    expect(tooltip.querySelector('[data-testid="upstream-billing-next-probe"]')).not.toBeNull()
+    wrapper.unmount()
+  })
+
+  it('is available for non-OpenAI API-key accounts', () => {
+    const wrapper = mount(UpstreamBillingRateCell, {
+      props: {
+        account: makeAccount({ platform: 'anthropic', type: 'apikey' }),
+        now: Date.now()
+      }
+    })
+
+    expect(wrapper.find('[data-testid="upstream-billing-details"]').exists()).toBe(true)
+    expect(wrapper.find('[data-testid="upstream-billing-probe"]').exists()).toBe(true)
+    wrapper.unmount()
+  })
+
   it('recomputes the current effective rate and keeps the icon-only probe action', async () => {
     const wrapper = mount(UpstreamBillingRateCell, {
       props: {

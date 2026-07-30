@@ -453,7 +453,8 @@ func normalizeGrokMediaEligibilityUpdateExtra(account *Account, input *UpdateAcc
 }
 
 func buildAccountForCreate(input *CreateAccountInput, accountExtra map[string]any) (*Account, error) {
-	// Probe/session state is system-managed. New accounts always start with automatic refresh disabled.
+	// Probe/session snapshots are system-managed. A missing probe switch means
+	// automatic refresh is enabled for a configured non-OAuth upstream account.
 	delete(accountExtra, UpstreamBillingProbeEnabledExtraKey)
 	delete(accountExtra, UpstreamBillingProbeExtraKey)
 	delete(accountExtra, OllamaCloudUsageSessionExtraKey)
@@ -472,14 +473,16 @@ func buildAccountForCreate(input *CreateAccountInput, accountExtra map[string]an
 		Status:      StatusActive,
 		Schedulable: true,
 	}
-	if input.ProbeEnabled != nil && *input.ProbeEnabled {
-		if !isUpstreamBillingProbeAccount(account) {
+	if input.ProbeEnabled != nil {
+		if !isUpstreamBillingProbeAccount(account) && *input.ProbeEnabled {
 			return nil, ErrUpstreamBillingProbeAccountInvalid
 		}
-		if account.Extra == nil {
+		if isUpstreamBillingProbeAccount(account) && account.Extra == nil {
 			account.Extra = make(map[string]any)
 		}
-		account.Extra[UpstreamBillingProbeEnabledExtraKey] = true
+		if isUpstreamBillingProbeAccount(account) {
+			account.Extra[UpstreamBillingProbeEnabledExtraKey] = *input.ProbeEnabled
+		}
 	}
 	// 预计算固定时间重置的下次重置时间
 	if account.Extra != nil {

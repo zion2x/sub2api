@@ -104,6 +104,36 @@ func TestLockAndMergeAccountProbeExtraUsesCurrentDatabaseSnapshot(t *testing.T) 
 	}
 }
 
+func TestLockAndMergeAccountProbeExtraPreservesNonOpenAIProbeState(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+	client := dbent.NewClient(dbent.Driver(entsql.OpenDB(dialect.Postgres, db)))
+	t.Cleanup(func() { _ = client.Close() })
+
+	mock.ExpectQuery(`(?s)`+regexp.QuoteMeta("SELECT")+`.*`+regexp.QuoteMeta("FOR NO KEY UPDATE")).
+		WithArgs(int64(28), service.PlatformAnthropic, service.AccountTypeAPIKey, `{"api_key":"sk-test"}`, nil).
+		WillReturnRows(sqlmock.NewRows([]string{"identity_unchanged", "ollama_group_unchanged", "ollama_proxy_unchanged", "enabled", "snapshot", "ollama_session", "ollama_auto", "ollama_snapshot"}).
+			AddRow(true, false, true, []byte(`false`), []byte(`{"status":"ok"}`), nil, nil, nil))
+
+	account := &service.Account{
+		ID:          28,
+		Platform:    service.PlatformAnthropic,
+		Type:        service.AccountTypeAPIKey,
+		Credentials: map[string]any{"api_key": "sk-test"},
+		Extra: map[string]any{
+			service.UpstreamBillingProbeEnabledExtraKey: true,
+			service.UpstreamBillingProbeExtraKey:        map[string]any{"status": "stale"},
+		},
+	}
+	got, err := lockAndMergeAccountProbeExtra(context.Background(), client, account, nil)
+
+	require.NoError(t, err)
+	require.Equal(t, false, got[service.UpstreamBillingProbeEnabledExtraKey])
+	require.NotContains(t, got, service.UpstreamBillingProbeExtraKey)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
 func TestLockAndMergeAccountProbeExtraProtectsOllamaManagedFields(t *testing.T) {
 	for _, identityUnchanged := range []bool{true, false} {
 		t.Run(map[bool]string{true: "same identity keeps snapshot", false: "changed identity clears snapshot"}[identityUnchanged], func(t *testing.T) {
@@ -227,8 +257,8 @@ func TestBulkUpdateProbeEligibilityMismatchRollsBack(t *testing.T) {
 
 	enabled := true
 	mock.ExpectBegin()
-	mock.ExpectExec(`(?s)UPDATE accounts SET extra = .* WHERE id = ANY\(\$2\) AND deleted_at IS NULL AND platform = \$3 AND type = \$4`).
-		WithArgs(sqlmock.AnyArg(), `{27,28}`, service.PlatformOpenAI, service.AccountTypeAPIKey).
+	mock.ExpectExec(`(?s)UPDATE accounts SET extra = .* WHERE id = ANY\(\$2\) AND deleted_at IS NULL AND type NOT IN \(\$3, \$4\)`).
+		WithArgs(sqlmock.AnyArg(), `{27,28}`, service.AccountTypeOAuth, service.AccountTypeSetupToken).
 		WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectRollback()
 
@@ -239,6 +269,33 @@ func TestBulkUpdateProbeEligibilityMismatchRollsBack(t *testing.T) {
 
 	require.ErrorIs(t, err, service.ErrUpstreamBillingProbeAccountInvalid)
 	require.Zero(t, rows)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestBulkUpdateProbeEnabledAcceptsNonOAuthAccounts(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+	client := dbent.NewClient(dbent.Driver(entsql.OpenDB(dialect.Postgres, db)))
+	t.Cleanup(func() { _ = client.Close() })
+
+	enabled := false
+	mock.ExpectBegin()
+	mock.ExpectExec(`(?s)UPDATE accounts SET extra = .* WHERE id = ANY\(\$2\) AND deleted_at IS NULL AND type NOT IN \(\$3, \$4\)`).
+		WithArgs(sqlmock.AnyArg(), `{27,28}`, service.AccountTypeOAuth, service.AccountTypeSetupToken).
+		WillReturnResult(sqlmock.NewResult(0, 2))
+	mock.ExpectExec(regexp.QuoteMeta("INSERT INTO scheduler_outbox")).
+		WithArgs(service.SchedulerOutboxEventAccountBulkChanged, nil, nil, sqlmock.AnyArg()).
+		WillReturnResult(sqlmock.NewResult(1, 1))
+	mock.ExpectCommit()
+
+	repo := newAccountRepositoryWithSQL(client, db, nil)
+	rows, err := repo.BulkUpdate(context.Background(), []int64{27, 28}, service.AccountBulkUpdate{
+		ProbeEnabled: &enabled,
+	})
+
+	require.NoError(t, err)
+	require.Equal(t, int64(2), rows)
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 

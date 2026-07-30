@@ -385,6 +385,15 @@ describe('BulkEditAccountModal', () => {
     expect(wrapper.find('#bulk-edit-upstream-billing-auto-probe-enabled').exists()).toBe(false)
   })
 
+  it('shows the upstream probe bulk switch for Anthropic API keys', () => {
+    const wrapper = mountModal({
+      selectedPlatforms: ['anthropic'],
+      selectedTypes: ['apikey']
+    })
+
+    expect(wrapper.find('#bulk-edit-upstream-billing-auto-probe-enabled').exists()).toBe(true)
+  })
+
   it('筛选结果批量编辑可统一开启上游倍率自动探测', async () => {
     const wrapper = mountModal({
       accountIds: [],

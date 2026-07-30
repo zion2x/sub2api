@@ -64,6 +64,18 @@ export async function list(
   return data
 }
 
+export type UpstreamAccountListFilters = Omit<NonNullable<Parameters<typeof list>[2]>, 'type'>
+
+/** List accounts classified by the backend as non-OAuth upstream accounts. */
+export async function listUpstreams(
+  page: number = 1,
+  pageSize: number = 20,
+  filters?: UpstreamAccountListFilters,
+  options?: { signal?: AbortSignal }
+): Promise<PaginatedResponse<Account>> {
+  return list(page, pageSize, { ...filters, type: 'non_oauth' }, options)
+}
+
 export interface AccountListWithEtagResult {
   notModified: boolean
   etag: string | null
@@ -930,6 +942,7 @@ export async function refreshOllamaCloudUsage(id: number): Promise<OllamaCloudUs
 
 export const accountsAPI = {
   list,
+  listUpstreams,
   listWithEtag,
   getById,
   create,

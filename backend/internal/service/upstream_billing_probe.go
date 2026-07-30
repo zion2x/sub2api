@@ -11,6 +11,7 @@ import (
 	"math"
 	"math/rand/v2"
 	"net/http"
+	"net/url"
 	"sort"
 	"strconv"
 	"strings"
@@ -30,28 +31,32 @@ const (
 	UpstreamBillingProbeExtraKey        = "upstream_billing_probe"
 	UpstreamBillingProbeEnabledExtraKey = "upstream_billing_probe_enabled"
 
-	upstreamBillingProbeDefaultIntervalMinutes = 30
-	upstreamBillingProbeMinIntervalMinutes     = 5
+	upstreamBillingProbeDefaultIntervalMinutes = 1
+	upstreamBillingProbeMinIntervalMinutes     = 1
 	upstreamBillingProbeMaxIntervalMinutes     = 24 * 60
 	upstreamBillingProbeCycleInterval          = time.Minute
 	upstreamBillingProbeRequestTimeout         = 10 * time.Second
 	upstreamBillingProbeMaxBodyBytes           = 64 * 1024
-	upstreamBillingProbeMaxPerCycle            = 20
-	upstreamBillingProbeConcurrency            = 4
+	upstreamBillingProbeMaxPerCycle            = 1000
+	upstreamBillingProbeManualBatchSize        = 20
+	upstreamBillingProbeConcurrency            = 8
 	upstreamBillingProbeMaxDelay               = 24 * time.Hour
 	upstreamBillingProbeLeaderLockKey          = "upstream:billing:probe:leader"
-	upstreamBillingProbeLeaderLockTTL          = 2 * time.Minute
+	upstreamBillingProbeMaxBatchRuntime        = time.Duration((upstreamBillingProbeMaxPerCycle+upstreamBillingProbeConcurrency-1)/upstreamBillingProbeConcurrency) * upstreamBillingProbeRequestTimeout
+	upstreamBillingProbeLeaderLockTTL          = upstreamBillingProbeMaxBatchRuntime + 5*time.Minute
 )
 
-// UpstreamBillingProbeMaxBatchSize limits one manual batch and one runner cycle.
-const UpstreamBillingProbeMaxBatchSize = upstreamBillingProbeMaxPerCycle
+// UpstreamBillingProbeMaxBatchSize limits one manual refresh request. The
+// periodic runner has a larger independent bound so all normal-size pools can
+// still be refreshed each minute.
+const UpstreamBillingProbeMaxBatchSize = upstreamBillingProbeManualBatchSize
 
 var (
 	ErrUpstreamBillingProbeUnavailable = infraerrors.ServiceUnavailable(
 		"UPSTREAM_BILLING_PROBE_UNAVAILABLE", "upstream billing probe is unavailable",
 	)
 	ErrUpstreamBillingProbeAccountInvalid = infraerrors.BadRequest(
-		"UPSTREAM_BILLING_PROBE_ACCOUNT_INVALID", "account is not an OpenAI API key account",
+		"UPSTREAM_BILLING_PROBE_ACCOUNT_INVALID", "account is not a non-OAuth upstream account",
 	)
 	ErrUpstreamBillingProbeIdentityChanged = infraerrors.Conflict(
 		"UPSTREAM_BILLING_PROBE_IDENTITY_CHANGED", "account identity changed during upstream billing probe; retry the probe",
@@ -106,6 +111,45 @@ type upstreamBillingProbeResponse struct {
 	EffectiveRateMultiplier *float64 `json:"effective_rate_multiplier"`
 	Timezone                *string  `json:"timezone"`
 	ObservedAt              string   `json:"observed_at"`
+}
+
+type upstreamInfoProbeResponse struct {
+	Object                  string   `json:"object"`
+	SchemaVersion           int      `json:"schema_version"`
+	Provider                string   `json:"provider"`
+	Balance                 *float64 `json:"balance"`
+	Currency                string   `json:"currency"`
+	KeyQuota                *float64 `json:"key_quota"`
+	KeyQuotaUsed            *float64 `json:"key_quota_used"`
+	KeyQuotaRemaining       *float64 `json:"key_quota_remaining"`
+	GroupCheckSupported     *bool    `json:"group_check_supported"`
+	RemoteGroupID           *int64   `json:"remote_group_id"`
+	RemoteGroupName         string   `json:"remote_group_name"`
+	RemoteGroupExists       *bool    `json:"remote_group_exists"`
+	RemoteGroupStatus       string   `json:"remote_group_status"`
+	GroupRateMultiplier     *float64 `json:"group_rate_multiplier"`
+	UserRateMultiplier      *float64 `json:"user_rate_multiplier"`
+	ResolvedRateMultiplier  *float64 `json:"resolved_rate_multiplier"`
+	PeakRateEnabled         *bool    `json:"peak_rate_enabled"`
+	PeakStart               *string  `json:"peak_start"`
+	PeakEnd                 *string  `json:"peak_end"`
+	PeakRateMultiplier      *float64 `json:"peak_rate_multiplier"`
+	AppliedPeakMultiplier   *float64 `json:"applied_peak_multiplier"`
+	EffectiveRateMultiplier *float64 `json:"effective_rate_multiplier"`
+	Timezone                *string  `json:"timezone"`
+	ObservedAt              string   `json:"observed_at"`
+}
+
+type upstreamProbeEndpoint struct {
+	provider string
+	path     string
+	newAPI   bool
+}
+
+type upstreamProbeHTTPResponse struct {
+	statusCode int
+	header     http.Header
+	body       []byte
 }
 
 // GetUpstreamBillingProbeSettings returns defaults when the setting is absent.
@@ -328,7 +372,8 @@ func (s *UpstreamBillingProbeService) RunDue(ctx context.Context) error {
 	due := make([]Account, 0, len(accounts))
 	for i := range accounts {
 		account := accounts[i]
-		if !isUpstreamBillingProbeAccount(&account) || !account.IsActive() || !upstreamBillingProbeEnabled(&account) {
+		if !isUpstreamBillingProbeAccount(&account) || !account.IsActive() ||
+			!upstreamBillingProbeEnabled(&account) || !upstreamBillingProbeConfigured(&account) {
 			continue
 		}
 		snapshot := decodeUpstreamBillingProbeSnapshot(account.Extra)
@@ -434,7 +479,7 @@ func (s *UpstreamBillingProbeService) probeAccountWithMode(ctx context.Context, 
 			return nil, ErrUpstreamBillingProbeAccountInvalid
 		}
 		if requireEnabled {
-			if !account.IsActive() || !upstreamBillingProbeEnabled(account) {
+			if !account.IsActive() || !upstreamBillingProbeEnabled(account) || !upstreamBillingProbeConfigured(account) {
 				return nil, nil
 			}
 			if snapshot := decodeUpstreamBillingProbeSnapshot(account.Extra); snapshot != nil &&
@@ -459,8 +504,8 @@ func (s *UpstreamBillingProbeService) probeAccountWithMode(ctx context.Context, 
 
 // ProbeAccounts performs a bounded manual batch with the same concurrency limit as the runner.
 func (s *UpstreamBillingProbeService) ProbeAccounts(ctx context.Context, accountIDs []int64) []UpstreamBillingProbeResult {
-	if len(accountIDs) > upstreamBillingProbeMaxPerCycle {
-		accountIDs = accountIDs[:upstreamBillingProbeMaxPerCycle]
+	if len(accountIDs) > upstreamBillingProbeManualBatchSize {
+		accountIDs = accountIDs[:upstreamBillingProbeManualBatchSize]
 	}
 	results := make([]UpstreamBillingProbeResult, len(accountIDs))
 	if s == nil || s.accountRepo == nil {
@@ -551,13 +596,13 @@ func (s *UpstreamBillingProbeService) probeLoadedAccount(ctx context.Context, ac
 	if s.accountTestService == nil || s.accountTestService.httpUpstream == nil {
 		return s.persistProbeFailure(ctx, account, intervalMinutes, now, 0, "transport_unavailable", 0)
 	}
-	apiKey := account.GetOpenAIApiKey()
+	apiKey := strings.TrimSpace(account.GetCredential("api_key"))
 	if apiKey == "" {
 		return s.persistProbeFailure(ctx, account, intervalMinutes, now, 0, "missing_api_key", 0)
 	}
-	baseURL := account.GetOpenAIBaseURL()
+	baseURL := strings.TrimSpace(account.GetCredential("base_url"))
 	if baseURL == "" {
-		baseURL = "https://api.openai.com"
+		return s.persistProbeFailure(ctx, account, intervalMinutes, now, 0, "missing_base_url", 0)
 	}
 	normalizedBaseURL, err := s.accountTestService.validateUpstreamBaseURL(baseURL)
 	if err != nil {
@@ -573,60 +618,139 @@ func (s *UpstreamBillingProbeService) probeLoadedAccount(ctx context.Context, ac
 		}
 		proxyURL = account.Proxy.URL()
 	}
-	probeURL := buildOpenAIEndpointURL(normalizedBaseURL, "/v1/sub2api/billing")
 	probeCtx, cancel := context.WithTimeout(ctx, upstreamBillingProbeRequestTimeout)
 	defer cancel()
-	req, err := http.NewRequestWithContext(probeCtx, http.MethodGet, probeURL, bytes.NewReader(nil))
-	if err != nil {
-		return s.persistProbeFailure(ctx, account, intervalMinutes, now, 0, "request_build_failed", 0)
-	}
-	reqCtx := WithHTTPUpstreamProfile(req.Context(), HTTPUpstreamProfileOpenAI)
-	req = req.WithContext(WithHTTPUpstreamRedirectsDisabled(reqCtx))
-	req.Header.Set("Accept", "application/json")
-	req.Header.Set("Authorization", "Bearer "+apiKey)
-	account.ApplyHeaderOverrides(req.Header)
 	var tlsProfile *tlsfingerprint.Profile
 	if s.accountTestService.tlsFPProfileService != nil {
 		tlsProfile = s.accountTestService.tlsFPProfileService.ResolveTLSProfile(account)
 	}
+
+	lastStatus := 0
+	lastReason := "unsupported"
+	lastRetryAfter := time.Duration(0)
+	for _, endpoint := range upstreamProbeEndpoints(account) {
+		probeURL := buildUpstreamProbeEndpointURL(normalizedBaseURL, endpoint)
+		result, reason := s.fetchUpstreamProbeEndpoint(probeCtx, account, proxyURL, tlsProfile, apiKey, probeURL)
+		if reason != "" {
+			statusCode := 0
+			retryDelay := time.Duration(0)
+			if result != nil {
+				statusCode = result.statusCode
+				retryDelay = retryAfter(result.header, now)
+			}
+			return s.persistProbeFailure(ctx, account, intervalMinutes, now, statusCode, reason, retryDelay)
+		}
+		lastStatus = result.statusCode
+		lastRetryAfter = retryAfter(result.header, now)
+		if result.statusCode == http.StatusNotFound || result.statusCode == http.StatusMethodNotAllowed {
+			continue
+		}
+		if result.statusCode < 200 || result.statusCode >= 300 {
+			return s.persistProbeFailure(ctx, account, intervalMinutes, now, result.statusCode, "http_error", lastRetryAfter)
+		}
+
+		data, parseErr := parseUpstreamProbeEndpointResponse(endpoint, result.body, now)
+		if parseErr != nil {
+			lastReason = "invalid_response"
+			continue
+		}
+		if endpoint.newAPI {
+			s.enrichNewAPIBalance(probeCtx, account, proxyURL, tlsProfile, normalizedBaseURL, data)
+			s.enrichNewAPIGroupCheck(probeCtx, account, proxyURL, tlsProfile, apiKey, normalizedBaseURL, data)
+		}
+		snapshot := &UpstreamBillingProbeSnapshot{
+			Status:        UpstreamBillingProbeStatusOK,
+			Data:          data,
+			ReceivedAt:    probeTimePtr(now),
+			FreshUntil:    probeTimePtr(now.Add(2 * time.Duration(intervalMinutes) * time.Minute)),
+			LastAttemptAt: now,
+			NextProbeAt:   now.Add(nextProbeDelay(intervalMinutes, 0)),
+			HTTPStatus:    result.statusCode,
+		}
+		if err := s.updateSnapshot(ctx, account, snapshot); err != nil {
+			return nil, err
+		}
+		return snapshot, nil
+	}
+	return s.persistProbeFailure(ctx, account, intervalMinutes, now, lastStatus, lastReason, lastRetryAfter)
+}
+
+func upstreamProbeEndpoints(account *Account) []upstreamProbeEndpoint {
+	sub2apiInfo := upstreamProbeEndpoint{provider: "sub2api", path: "/v1/sub2api/upstream-info"}
+	sub2apiBilling := upstreamProbeEndpoint{provider: "sub2api", path: "/v1/sub2api/billing"}
+	newAPIUsage := upstreamProbeEndpoint{provider: "newapi", path: "/api/usage/token/", newAPI: true}
+	provider := ""
+	if snapshot := decodeUpstreamBillingProbeSnapshot(account.Extra); snapshot != nil && snapshot.Data != nil {
+		provider, _ = snapshot.Data["provider"].(string)
+		if provider == "" {
+			if object, _ := snapshot.Data["object"].(string); strings.HasPrefix(object, "sub2api.") {
+				provider = "sub2api"
+			}
+		}
+	}
+	if provider == "newapi" {
+		return []upstreamProbeEndpoint{newAPIUsage, sub2apiInfo, sub2apiBilling}
+	}
+	return []upstreamProbeEndpoint{sub2apiInfo, sub2apiBilling, newAPIUsage}
+}
+
+func buildUpstreamProbeEndpointURL(baseURL string, endpoint upstreamProbeEndpoint) string {
+	if !endpoint.newAPI {
+		return buildOpenAIEndpointURL(baseURL, endpoint.path)
+	}
+	parsed, err := url.Parse(strings.TrimSpace(baseURL))
+	if err != nil {
+		return strings.TrimRight(baseURL, "/") + endpoint.path
+	}
+	path := strings.TrimRight(parsed.Path, "/")
+	if slash := strings.LastIndex(path, "/"); slash >= 0 && openAIBaseURLHasVersionSuffix(path) {
+		path = path[:slash]
+	} else if openAIBaseURLHasVersionSuffix(path) {
+		path = ""
+	}
+	parsed.Path = strings.TrimRight(path, "/") + endpoint.path
+	parsed.RawPath = ""
+	parsed.RawQuery = ""
+	parsed.Fragment = ""
+	return parsed.String()
+}
+
+func (s *UpstreamBillingProbeService) fetchUpstreamProbeEndpoint(
+	ctx context.Context,
+	account *Account,
+	proxyURL string,
+	tlsProfile *tlsfingerprint.Profile,
+	apiKey string,
+	probeURL string,
+) (*upstreamProbeHTTPResponse, string) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, probeURL, bytes.NewReader(nil))
+	if err != nil {
+		return nil, "request_build_failed"
+	}
+	reqCtx := WithHTTPUpstreamProfile(req.Context(), HTTPUpstreamProfileOpenAI)
+	req = req.WithContext(WithHTTPUpstreamRedirectsDisabled(reqCtx))
+	req.Header.Set("Accept", "application/json")
+	if strings.TrimSpace(apiKey) != "" {
+		req.Header.Set("Authorization", "Bearer "+apiKey)
+	}
+	account.ApplyHeaderOverrides(req.Header)
 	resp, err := s.accountTestService.httpUpstream.DoWithTLS(req, proxyURL, account.ID, account.Concurrency, tlsProfile)
 	if err != nil {
-		return s.persistProbeFailure(ctx, account, intervalMinutes, now, 0, "request_failed", 0)
+		return nil, "request_failed"
 	}
 	if resp == nil || resp.Body == nil {
-		return s.persistProbeFailure(ctx, account, intervalMinutes, now, 0, "empty_response", 0)
+		return nil, "empty_response"
 	}
 	defer func() { _ = resp.Body.Close() }()
-	body, readErr := io.ReadAll(io.LimitReader(resp.Body, upstreamBillingProbeMaxBodyBytes+1))
-	if readErr != nil {
-		return s.persistProbeFailure(ctx, account, intervalMinutes, now, resp.StatusCode, "response_read_failed", retryAfter(resp.Header, now))
+	body, err := io.ReadAll(io.LimitReader(resp.Body, upstreamBillingProbeMaxBodyBytes+1))
+	result := &upstreamProbeHTTPResponse{statusCode: resp.StatusCode, header: resp.Header, body: body}
+	if err != nil {
+		return result, "response_read_failed"
 	}
 	if len(body) > upstreamBillingProbeMaxBodyBytes {
-		return s.persistProbeFailure(ctx, account, intervalMinutes, now, resp.StatusCode, "response_too_large", retryAfter(resp.Header, now))
+		return result, "response_too_large"
 	}
-	if resp.StatusCode == http.StatusNotFound || resp.StatusCode == http.StatusMethodNotAllowed {
-		return s.persistProbeFailure(ctx, account, intervalMinutes, now, resp.StatusCode, "unsupported", retryAfter(resp.Header, now))
-	}
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return s.persistProbeFailure(ctx, account, intervalMinutes, now, resp.StatusCode, "http_error", retryAfter(resp.Header, now))
-	}
-	data, err := parseUpstreamBillingProbeResponse(body)
-	if err != nil {
-		return s.persistProbeFailure(ctx, account, intervalMinutes, now, resp.StatusCode, "invalid_response", retryAfter(resp.Header, now))
-	}
-	snapshot := &UpstreamBillingProbeSnapshot{
-		Status:        UpstreamBillingProbeStatusOK,
-		Data:          data,
-		ReceivedAt:    probeTimePtr(now),
-		FreshUntil:    probeTimePtr(now.Add(2 * time.Duration(intervalMinutes) * time.Minute)),
-		LastAttemptAt: now,
-		NextProbeAt:   now.Add(nextProbeDelay(intervalMinutes, 0)),
-		HTTPStatus:    resp.StatusCode,
-	}
-	if err := s.updateSnapshot(ctx, account, snapshot); err != nil {
-		return nil, err
-	}
-	return snapshot, nil
+	return result, ""
 }
 
 func (s *UpstreamBillingProbeService) persistProbeFailure(
@@ -677,6 +801,378 @@ func (s *UpstreamBillingProbeService) updateSnapshot(ctx context.Context, accoun
 	return writer.UpdateUpstreamBillingProbeSnapshot(ctx, account, snapshot)
 }
 
+func parseUpstreamProbeEndpointResponse(endpoint upstreamProbeEndpoint, body []byte, observedAt time.Time) (map[string]any, error) {
+	if endpoint.newAPI {
+		return parseNewAPIUsageResponse(body, observedAt)
+	}
+	var identity struct {
+		Object string `json:"object"`
+	}
+	if err := json.Unmarshal(body, &identity); err != nil {
+		return nil, err
+	}
+	switch identity.Object {
+	case "sub2api.upstream_info":
+		return parseSub2APIUpstreamInfoResponse(body)
+	case "sub2api.key_billing":
+		return parseUpstreamBillingProbeResponse(body)
+	default:
+		return nil, fmt.Errorf("unexpected upstream response schema")
+	}
+}
+
+func parseSub2APIUpstreamInfoResponse(body []byte) (map[string]any, error) {
+	var response upstreamInfoProbeResponse
+	if err := json.Unmarshal(body, &response); err != nil {
+		return nil, err
+	}
+	if response.Object != "sub2api.upstream_info" || response.SchemaVersion != 1 || response.Provider != "sub2api" {
+		return nil, fmt.Errorf("unexpected upstream info response schema")
+	}
+	observedAt, err := time.Parse(time.RFC3339Nano, response.ObservedAt)
+	if err != nil || observedAt.IsZero() {
+		return nil, fmt.Errorf("invalid observed_at")
+	}
+	for _, value := range []*float64{response.Balance, response.KeyQuota, response.KeyQuotaUsed, response.KeyQuotaRemaining} {
+		if value != nil && (math.IsNaN(*value) || math.IsInf(*value, 0)) {
+			return nil, fmt.Errorf("invalid upstream balance")
+		}
+	}
+	for _, value := range []*float64{response.KeyQuota, response.KeyQuotaUsed, response.KeyQuotaRemaining} {
+		if value != nil && *value < 0 {
+			return nil, fmt.Errorf("invalid upstream quota")
+		}
+	}
+
+	data := map[string]any{
+		"object":         response.Object,
+		"schema_version": response.SchemaVersion,
+		"provider":       response.Provider,
+		"observed_at":    observedAt.UTC().Format(time.RFC3339Nano),
+	}
+	copyOptionalProbeNumber(data, "balance", response.Balance)
+	copyOptionalProbeNumber(data, "key_quota", response.KeyQuota)
+	copyOptionalProbeNumber(data, "key_quota_used", response.KeyQuotaUsed)
+	copyOptionalProbeNumber(data, "key_quota_remaining", response.KeyQuotaRemaining)
+	if response.Currency != "" {
+		data["currency"] = response.Currency
+	}
+	if response.GroupCheckSupported != nil {
+		data["group_check_supported"] = *response.GroupCheckSupported
+	}
+	if response.RemoteGroupID != nil {
+		data["remote_group_id"] = *response.RemoteGroupID
+	}
+	if response.RemoteGroupName != "" {
+		data["remote_group_name"] = response.RemoteGroupName
+	}
+	if response.RemoteGroupExists != nil {
+		data["remote_group_exists"] = *response.RemoteGroupExists
+	}
+	if response.RemoteGroupStatus != "" {
+		data["remote_group_status"] = response.RemoteGroupStatus
+	}
+
+	if response.GroupRateMultiplier != nil || response.ResolvedRateMultiplier != nil || response.EffectiveRateMultiplier != nil {
+		billingPayload, marshalErr := json.Marshal(upstreamBillingProbeResponse{
+			Object:                  "sub2api.key_billing",
+			SchemaVersion:           1,
+			BillingScope:            "token",
+			GroupRateMultiplier:     response.GroupRateMultiplier,
+			UserRateMultiplier:      response.UserRateMultiplier,
+			ResolvedRateMultiplier:  response.ResolvedRateMultiplier,
+			PeakRateEnabled:         response.PeakRateEnabled,
+			PeakStart:               response.PeakStart,
+			PeakEnd:                 response.PeakEnd,
+			PeakRateMultiplier:      response.PeakRateMultiplier,
+			AppliedPeakMultiplier:   response.AppliedPeakMultiplier,
+			EffectiveRateMultiplier: response.EffectiveRateMultiplier,
+			Timezone:                response.Timezone,
+			ObservedAt:              response.ObservedAt,
+		})
+		if marshalErr != nil {
+			return nil, marshalErr
+		}
+		billingData, parseErr := parseUpstreamBillingProbeResponse(billingPayload)
+		if parseErr != nil {
+			return nil, parseErr
+		}
+		for key, value := range billingData {
+			if key != "object" && key != "schema_version" && key != "provider" && key != "observed_at" {
+				data[key] = value
+			}
+		}
+	}
+	return data, nil
+}
+
+func parseNewAPIUsageResponse(body []byte, observedAt time.Time) (map[string]any, error) {
+	decoder := json.NewDecoder(bytes.NewReader(body))
+	decoder.UseNumber()
+	var root map[string]any
+	if err := decoder.Decode(&root); err != nil {
+		return nil, err
+	}
+	if success, ok := root["success"].(bool); ok && !success {
+		return nil, fmt.Errorf("newapi usage request failed")
+	}
+	if code, ok := root["code"].(bool); ok && !code {
+		return nil, fmt.Errorf("newapi usage request failed")
+	}
+	payload := root
+	if nested, ok := root["data"].(map[string]any); ok {
+		payload = nested
+	}
+
+	data := map[string]any{
+		"object":                "newapi.token_usage",
+		"schema_version":        1,
+		"provider":              "newapi",
+		"group_check_supported": false,
+		"observed_at":           observedAt.UTC().Format(time.RFC3339Nano),
+	}
+	recognized := false
+	for _, mapping := range []struct {
+		output string
+		keys   []string
+	}{
+		{output: "balance", keys: []string{"balance", "remaining_balance"}},
+		{output: "total_granted", keys: []string{"total_granted"}},
+		{output: "total_used", keys: []string{"total_used"}},
+		{output: "key_quota", keys: []string{"key_quota", "quota", "total_granted"}},
+		{output: "key_quota_used", keys: []string{"key_quota_used", "used_quota", "total_used"}},
+		{output: "key_quota_remaining", keys: []string{"key_quota_remaining", "total_available"}},
+		{output: "group_rate_multiplier", keys: []string{"group_rate_multiplier", "group_ratio"}},
+		{output: "resolved_rate_multiplier", keys: []string{"resolved_rate_multiplier", "rate_multiplier", "ratio"}},
+	} {
+		if value, ok := firstProbeNumber(payload, mapping.keys...); ok {
+			if math.IsNaN(value) || math.IsInf(value, 0) {
+				return nil, fmt.Errorf("invalid newapi numeric value")
+			}
+			data[mapping.output] = value
+			recognized = true
+		}
+	}
+	if value, ok := firstProbeString(payload, "currency"); ok {
+		data["currency"] = value
+	}
+	if value, ok := firstProbeBool(payload, "unlimited_quota"); ok {
+		data["unlimited_quota"] = value
+		recognized = true
+	}
+	if value, ok := firstProbeString(payload, "group", "group_name", "token_group"); ok {
+		data["remote_group_name"] = value
+		recognized = true
+	}
+	if value, ok := firstProbeScalar(payload, "group_id"); ok {
+		data["remote_group_id"] = value
+		recognized = true
+	}
+	if value, ok := firstProbeBool(payload, "group_exists", "remote_group_exists"); ok {
+		data["remote_group_exists"] = value
+		data["group_check_supported"] = true
+		recognized = true
+	}
+	if value, ok := firstProbeString(payload, "group_status", "remote_group_status"); ok {
+		data["remote_group_status"] = value
+		recognized = true
+	}
+	if _, ok := payload["name"]; ok {
+		recognized = true
+	}
+	if !recognized {
+		return nil, fmt.Errorf("unrecognized newapi usage response")
+	}
+
+	if resolved, ok := data["resolved_rate_multiplier"].(float64); ok {
+		if resolved < 0 {
+			return nil, fmt.Errorf("invalid newapi multiplier")
+		}
+		data["billing_scope"] = "token"
+		data["peak_rate_enabled"] = false
+		data["effective_rate_multiplier"] = resolved
+	} else if groupRate, ok := data["group_rate_multiplier"].(float64); ok {
+		if groupRate < 0 {
+			return nil, fmt.Errorf("invalid newapi multiplier")
+		}
+		data["billing_scope"] = "token"
+		data["resolved_rate_multiplier"] = groupRate
+		data["peak_rate_enabled"] = false
+		data["effective_rate_multiplier"] = groupRate
+	}
+	return data, nil
+}
+
+func (s *UpstreamBillingProbeService) enrichNewAPIBalance(
+	ctx context.Context,
+	account *Account,
+	proxyURL string,
+	tlsProfile *tlsfingerprint.Profile,
+	baseURL string,
+	data map[string]any,
+) {
+	statusEndpoint := upstreamProbeEndpoint{provider: "newapi", path: "/api/status", newAPI: true}
+	statusURL := buildUpstreamProbeEndpointURL(baseURL, statusEndpoint)
+	result, reason := s.fetchUpstreamProbeEndpoint(ctx, account, proxyURL, tlsProfile, "", statusURL)
+	if reason != "" || result == nil || result.statusCode < 200 || result.statusCode >= 300 {
+		return
+	}
+
+	decoder := json.NewDecoder(bytes.NewReader(result.body))
+	decoder.UseNumber()
+	var root map[string]any
+	if err := decoder.Decode(&root); err != nil {
+		return
+	}
+	if success, ok := root["success"].(bool); ok && !success {
+		return
+	}
+	if code, ok := root["code"].(bool); ok && !code {
+		return
+	}
+	payload := root
+	if nested, ok := root["data"].(map[string]any); ok {
+		payload = nested
+	}
+
+	quotaPerUnit, ok := firstProbeNumber(payload, "quota_per_unit")
+	if !ok || quotaPerUnit <= 0 || math.IsNaN(quotaPerUnit) || math.IsInf(quotaPerUnit, 0) {
+		return
+	}
+	data["quota_per_unit"] = quotaPerUnit
+	if value, ok := firstProbeString(payload, "quota_display_type"); ok {
+		data["quota_display_type"] = value
+	}
+	if value, ok := firstProbeNumber(payload, "usd_exchange_rate"); ok && value > 0 && !math.IsNaN(value) && !math.IsInf(value, 0) {
+		data["usd_exchange_rate"] = value
+	}
+	if unlimited, _ := data["unlimited_quota"].(bool); unlimited {
+		delete(data, "balance")
+		delete(data, "currency")
+		return
+	}
+	remaining, ok := data["key_quota_remaining"].(float64)
+	if !ok || math.IsNaN(remaining) || math.IsInf(remaining, 0) {
+		return
+	}
+	data["balance"] = remaining / quotaPerUnit
+	data["currency"] = "USD"
+}
+
+func (s *UpstreamBillingProbeService) enrichNewAPIGroupCheck(
+	ctx context.Context,
+	account *Account,
+	proxyURL string,
+	tlsProfile *tlsfingerprint.Profile,
+	apiKey string,
+	baseURL string,
+	data map[string]any,
+) {
+	if supported, _ := data["group_check_supported"].(bool); supported {
+		return
+	}
+	modelsURL := buildOpenAIEndpointURL(baseURL, "/v1/models")
+	result, _ := s.fetchUpstreamProbeEndpoint(ctx, account, proxyURL, tlsProfile, apiKey, modelsURL)
+	if result == nil {
+		return
+	}
+	if result.statusCode >= 200 && result.statusCode < 300 {
+		data["group_check_supported"] = true
+		data["group_routing_healthy"] = true
+		data["remote_group_status"] = "usable"
+		return
+	}
+	if result.statusCode == http.StatusBadRequest || result.statusCode == http.StatusForbidden {
+		message := strings.ToLower(string(result.body))
+		mentionsGroup := strings.Contains(message, "group") || strings.Contains(message, "\u5206\u7ec4")
+		if mentionsGroup {
+			data["group_check_supported"] = true
+			data["group_routing_healthy"] = false
+			data["remote_group_status"] = "unavailable"
+
+			missing := strings.Contains(message, "not exist") ||
+				strings.Contains(message, "deleted") ||
+				strings.Contains(message, "deprecated") ||
+				strings.Contains(message, "\u4e0d\u5b58\u5728") ||
+				strings.Contains(message, "\u5df2\u88ab\u5f03\u7528")
+			if missing {
+				data["remote_group_exists"] = false
+				data["remote_group_status"] = "missing"
+				return
+			}
+
+			forbidden := strings.Contains(message, "forbidden") ||
+				strings.Contains(message, "no access") ||
+				strings.Contains(message, "unauthorized") ||
+				strings.Contains(message, "\u65e0\u6743\u8bbf\u95ee")
+			if forbidden {
+				data["remote_group_status"] = "forbidden"
+			}
+		}
+	}
+}
+
+func copyOptionalProbeNumber(target map[string]any, key string, value *float64) {
+	if value != nil {
+		target[key] = *value
+	}
+}
+
+func firstProbeNumber(values map[string]any, keys ...string) (float64, bool) {
+	for _, key := range keys {
+		switch value := values[key].(type) {
+		case json.Number:
+			parsed, err := value.Float64()
+			if err == nil {
+				return parsed, true
+			}
+		case float64:
+			return value, true
+		case float32:
+			return float64(value), true
+		case int:
+			return float64(value), true
+		case int64:
+			return float64(value), true
+		}
+	}
+	return 0, false
+}
+
+func firstProbeString(values map[string]any, keys ...string) (string, bool) {
+	for _, key := range keys {
+		if value, ok := values[key].(string); ok && strings.TrimSpace(value) != "" {
+			return strings.TrimSpace(value), true
+		}
+	}
+	return "", false
+}
+
+func firstProbeBool(values map[string]any, keys ...string) (bool, bool) {
+	for _, key := range keys {
+		if value, ok := values[key].(bool); ok {
+			return value, true
+		}
+	}
+	return false, false
+}
+
+func firstProbeScalar(values map[string]any, keys ...string) (any, bool) {
+	for _, key := range keys {
+		switch value := values[key].(type) {
+		case string:
+			if strings.TrimSpace(value) != "" {
+				return strings.TrimSpace(value), true
+			}
+		case json.Number:
+			return value.String(), true
+		case float64, int, int64:
+			return value, true
+		}
+	}
+	return nil, false
+}
+
 func parseUpstreamBillingProbeResponse(body []byte) (map[string]any, error) {
 	var response upstreamBillingProbeResponse
 	if err := json.Unmarshal(body, &response); err != nil {
@@ -715,6 +1211,8 @@ func parseUpstreamBillingProbeResponse(body []byte) (map[string]any, error) {
 	data := map[string]any{
 		"object":                    response.Object,
 		"schema_version":            response.SchemaVersion,
+		"provider":                  "sub2api",
+		"group_check_supported":     false,
 		"billing_scope":             response.BillingScope,
 		"group_rate_multiplier":     *response.GroupRateMultiplier,
 		"resolved_rate_multiplier":  *response.ResolvedRateMultiplier,
@@ -840,16 +1338,31 @@ func decodeUpstreamBillingProbeSnapshot(extra map[string]any) *UpstreamBillingPr
 	return &snapshot
 }
 
+// IsUpstreamBillingProbeAccount reports whether an account belongs to the
+// non-OAuth upstream account class managed by the billing probe.
+func IsUpstreamBillingProbeAccount(account *Account) bool {
+	return account != nil && !account.IsOAuth()
+}
+
 func isUpstreamBillingProbeAccount(account *Account) bool {
-	return account != nil && account.Platform == PlatformOpenAI && account.Type == AccountTypeAPIKey
+	return IsUpstreamBillingProbeAccount(account)
 }
 
 func upstreamBillingProbeEnabled(account *Account) bool {
-	if account == nil || account.Extra == nil {
+	if account == nil {
 		return false
 	}
+	if account.Extra == nil {
+		return true
+	}
 	enabled, ok := account.Extra[UpstreamBillingProbeEnabledExtraKey].(bool)
-	return ok && enabled
+	return !ok || enabled
+}
+
+func upstreamBillingProbeConfigured(account *Account) bool {
+	return account != nil &&
+		strings.TrimSpace(account.GetCredential("api_key")) != "" &&
+		strings.TrimSpace(account.GetCredential("base_url")) != ""
 }
 
 func (s *UpstreamBillingProbeService) currentTime() time.Time {
@@ -867,7 +1380,12 @@ func nextProbeDelay(intervalMinutes int, retryAfterDuration time.Duration) time.
 	if interval > upstreamBillingProbeMaxDelay {
 		interval = upstreamBillingProbeMaxDelay
 	}
-	jitterRange := interval / 5
+	// A one-minute interval must remain due on every runner tick. Positive
+	// jitter would otherwise turn some refreshes into two-minute gaps.
+	jitterRange := time.Duration(0)
+	if interval > time.Minute {
+		jitterRange = interval / 5
+	}
 	if jitterRange > 5*time.Minute {
 		jitterRange = 5 * time.Minute
 	}

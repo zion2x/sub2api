@@ -4404,7 +4404,7 @@
                     id="upstream-billing-probe-interval"
                     v-model.number="upstreamBillingProbeForm.interval_minutes"
                     type="number"
-                    min="5"
+                    min="1"
                     max="1440"
                     class="input w-32"
                     data-testid="upstream-billing-probe-interval"
@@ -8243,7 +8243,7 @@ const upstreamBillingProbeLoading = ref(true);
 const upstreamBillingProbeSaving = ref(false);
 const upstreamBillingProbeForm = reactive({
   enabled: true,
-  interval_minutes: 30,
+  interval_minutes: 1,
 });
 
 const ollamaCloudUsageLoading = ref(true);

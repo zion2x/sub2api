@@ -309,3 +309,79 @@ func TestGatewayHandlerKeyBillingInfoSharesBillingResolverCacheByPlatform(t *tes
 		})
 	}
 }
+
+func TestGatewayHandlerKeyUpstreamInfoReturnsBalanceGroupAndRates(t *testing.T) {
+	groupID := int64(7)
+	userRate := 0.5
+	apiKey := &service.APIKey{
+		UserID:    11,
+		GroupID:   &groupID,
+		Quota:     20,
+		QuotaUsed: 6,
+		User:      &service.User{Balance: 12.5},
+		Group: &service.Group{
+			ID:             groupID,
+			Name:           "paid-openai",
+			Status:         service.StatusActive,
+			Platform:       service.PlatformOpenAI,
+			RateMultiplier: 0.75,
+		},
+	}
+	c, w := newKeyBillingContext(apiKey)
+
+	newKeyBillingHandler(&keyBillingUserGroupRateRepo{rate: &userRate}).KeyUpstreamInfo(c)
+
+	require.Equal(t, http.StatusOK, w.Code)
+	require.Equal(t, "no-store", w.Header().Get("Cache-Control"))
+	var got keyUpstreamInfoResponse
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &got))
+	require.Equal(t, "sub2api.upstream_info", got.Object)
+	require.Equal(t, "sub2api", got.Provider)
+	require.NotNil(t, got.Balance)
+	require.Equal(t, 12.5, *got.Balance)
+	require.Equal(t, 20.0, got.KeyQuota)
+	require.Equal(t, 6.0, got.KeyQuotaUsed)
+	require.NotNil(t, got.KeyQuotaRemaining)
+	require.Equal(t, 14.0, *got.KeyQuotaRemaining)
+	require.True(t, got.GroupCheckSupported)
+	require.Equal(t, &groupID, got.RemoteGroupID)
+	require.Equal(t, "paid-openai", got.RemoteGroupName)
+	require.NotNil(t, got.RemoteGroupExists)
+	require.True(t, *got.RemoteGroupExists)
+	require.Equal(t, service.StatusActive, got.RemoteGroupStatus)
+	require.NotNil(t, got.GroupRateMultiplier)
+	require.Equal(t, 0.75, *got.GroupRateMultiplier)
+	require.NotNil(t, got.ResolvedRateMultiplier)
+	require.Equal(t, 0.5, *got.ResolvedRateMultiplier)
+	require.NotNil(t, got.EffectiveRateMultiplier)
+	require.Equal(t, 0.5, *got.EffectiveRateMultiplier)
+	require.NotContains(t, w.Body.String(), "sk-sensitive")
+}
+
+func TestGatewayHandlerKeyUpstreamInfoMarksMissingGroup(t *testing.T) {
+	groupID := int64(99)
+	apiKey := &service.APIKey{
+		GroupID: &groupID,
+		User:    &service.User{Balance: 3},
+	}
+	c, w := newKeyBillingContext(apiKey)
+
+	newKeyBillingHandler(nil).KeyUpstreamInfo(c)
+
+	require.Equal(t, http.StatusOK, w.Code)
+	var got keyUpstreamInfoResponse
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &got))
+	require.True(t, got.GroupCheckSupported)
+	require.Equal(t, &groupID, got.RemoteGroupID)
+	require.NotNil(t, got.RemoteGroupExists)
+	require.False(t, *got.RemoteGroupExists)
+	require.Nil(t, got.GroupRateMultiplier)
+}
+
+func TestBuildKeyUpstreamInfoSimpleModeDoesNotReportMissingGroup(t *testing.T) {
+	got := buildKeyUpstreamInfo(&service.APIKey{User: &service.User{Balance: 2}}, time.Now(), false)
+
+	require.False(t, got.GroupCheckSupported)
+	require.Nil(t, got.RemoteGroupExists)
+	require.Nil(t, got.RemoteGroupID)
+}
