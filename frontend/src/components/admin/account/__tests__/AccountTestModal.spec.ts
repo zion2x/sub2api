@@ -168,6 +168,10 @@ describe('AccountTestModal', () => {
     await wrapper.setProps({ show: true })
     await flushPromises()
 
+    const promptInput = wrapper.find('textarea.textarea-stub')
+    expect((promptInput.element as HTMLTextAreaElement).value).toBe('hi')
+    await promptInput.setValue('reply with pong')
+
     const buttons = wrapper.findAll('button')
     const startButton = buttons.find((button) => button.text().includes('admin.accounts.startTest'))
     expect(startButton).toBeTruthy()
@@ -179,7 +183,7 @@ describe('AccountTestModal', () => {
     const [, request] = (global.fetch as any).mock.calls[0]
     expect(JSON.parse(request.body)).toEqual({
       model_id: 'grok-4.3',
-      prompt: ''
+      prompt: 'reply with pong'
     })
   })
 
@@ -212,7 +216,7 @@ describe('AccountTestModal', () => {
     const [, request] = (global.fetch as any).mock.calls[0]
     expect(JSON.parse(request.body)).toMatchObject({
       model_id: 'gpt-5.4',
-      prompt: '',
+      prompt: 'hi',
       mode: 'compact'
     })
   })

@@ -135,6 +135,9 @@ describe('AccountTestModal', () => {
     })
 
     await flushPromises()
+    const promptInput = wrapper.find('textarea')
+    expect((promptInput.element as HTMLTextAreaElement).value).toBe('hi')
+    await promptInput.setValue('summarize this connection test')
     ;(wrapper.vm as any).selectedModelId = 'gpt-5.4'
     ;(wrapper.vm as any).testMode = 'compact'
     await (wrapper.vm as any).startTest()
@@ -144,7 +147,8 @@ describe('AccountTestModal', () => {
     const [, options] = (global.fetch as any).mock.calls[0]
     expect(JSON.parse(options.body)).toMatchObject({
       model_id: 'gpt-5.4',
-      mode: 'compact'
+      mode: 'compact',
+      prompt: 'summarize this connection test'
     })
   })
 

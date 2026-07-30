@@ -23,7 +23,11 @@ func normalizeAccountTestMode(mode string) string {
 	}
 }
 
-func createOpenAICompactProbePayload(model string) map[string]any {
+func createOpenAICompactProbePayload(model string, prompts ...string) map[string]any {
+	prompt := "Respond with OK."
+	if len(prompts) > 0 && strings.TrimSpace(prompts[0]) != "" {
+		prompt = strings.TrimSpace(prompts[0])
+	}
 	return map[string]any{
 		"model":        strings.TrimSpace(model),
 		"instructions": "You are a helpful coding assistant.",
@@ -31,7 +35,7 @@ func createOpenAICompactProbePayload(model string) map[string]any {
 			map[string]any{
 				"type":    "message",
 				"role":    "user",
-				"content": "Respond with OK.",
+				"content": prompt,
 			},
 		},
 	}

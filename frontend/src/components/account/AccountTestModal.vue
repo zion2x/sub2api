@@ -66,12 +66,12 @@
         />
       </div>
 
-      <div v-if="supportsImageTest" class="space-y-1.5">
+      <div class="space-y-1.5">
         <TextArea
           v-model="testPrompt"
-          :label="t('admin.accounts.imagePromptLabel')"
-          :placeholder="t('admin.accounts.imagePromptPlaceholder')"
-          :hint="t('admin.accounts.imageTestHint')"
+          :label="supportsImageTest ? t('admin.accounts.imagePromptLabel') : t('admin.accounts.testPromptLabel')"
+          :placeholder="supportsImageTest ? t('admin.accounts.imagePromptPlaceholder') : t('admin.accounts.testPromptPlaceholder')"
+          :hint="supportsImageTest ? t('admin.accounts.imageTestHint') : t('admin.accounts.testPromptHint')"
           :disabled="status === 'connecting'"
           rows="3"
         />
@@ -189,7 +189,7 @@
           {{
             supportsImageTest
               ? t('admin.accounts.imageTestMode')
-              : t('admin.accounts.testPrompt')
+              : t('admin.accounts.textTestMode')
           }}
         </span>
       </div>
@@ -205,10 +205,10 @@
         </button>
         <button
           @click="startTest"
-          :disabled="status === 'connecting' || !selectedModelId"
+          :disabled="status === 'connecting' || !selectedModelId || !testPrompt.trim()"
           :class="[
             'flex items-center gap-2 rounded-lg px-4 py-2 text-sm font-medium transition-all',
-            status === 'connecting' || !selectedModelId
+            status === 'connecting' || !selectedModelId || !testPrompt.trim()
               ? 'cursor-not-allowed bg-primary-400 text-white'
               : status === 'success'
                 ? 'bg-green-500 text-white hover:bg-green-600'
@@ -282,7 +282,8 @@ const streamingContent = ref('')
 const errorMessage = ref('')
 const availableModels = ref<ClaudeModel[]>([])
 const selectedModelId = ref('')
-const testPrompt = ref('')
+const defaultTextPrompt = 'hi'
+const testPrompt = ref(defaultTextPrompt)
 const loadingModels = ref(false)
 let abortController: AbortController | null = null
 const generatedImages = ref<PreviewImage[]>([])
@@ -325,7 +326,7 @@ watch(
   () => props.show,
   async (newVal) => {
     if (newVal && props.account) {
-      testPrompt.value = ''
+      testPrompt.value = defaultTextPrompt
       testMode.value = 'default'
       resetState()
       await loadAvailableModels()
@@ -336,8 +337,11 @@ watch(
 )
 
 watch(selectedModelId, () => {
-  if (supportsImageTest.value && !testPrompt.value.trim()) {
+  const imagePrompt = t('admin.accounts.imagePromptDefault')
+  if (supportsImageTest.value && (!testPrompt.value.trim() || testPrompt.value === defaultTextPrompt)) {
     testPrompt.value = t('admin.accounts.imagePromptDefault')
+  } else if (!supportsImageTest.value && (!testPrompt.value.trim() || testPrompt.value === imagePrompt)) {
+    testPrompt.value = defaultTextPrompt
   }
 })
 
@@ -430,7 +434,7 @@ const startTest = async () => {
       },
       body: JSON.stringify({
         model_id: selectedModelId.value,
-        prompt: supportsImageTest.value ? testPrompt.value.trim() : '',
+        prompt: testPrompt.value.trim(),
         mode: isOpenAIAccount.value ? testMode.value : 'default'
       }),
       signal: abortController.signal
@@ -500,7 +504,7 @@ const handleEvent = (event: {
       addLine(
         supportsImageTest.value
             ? t('admin.accounts.sendingImageRequest')
-            : t('admin.accounts.sendingTestMessage'),
+            : t('admin.accounts.sendingTestMessage', { prompt: testPrompt.value }),
         'text-gray-400'
       )
       addLine('', 'text-gray-300')
