@@ -28,6 +28,8 @@ func TestAccountRepositoryListDueUpstreamBillingProbeAccountsBoundsQuery(t *test
 	normalized := normalizeSQLWhitespace(capturedSQL)
 	require.Contains(t, normalized, "deleted_at IS NULL")
 	require.Contains(t, normalized, "status = 'active'")
+	// Probe eligibility is type-based and must not filter by platform.
+	require.NotContains(t, normalized, "platform")
 	require.Contains(t, normalized, "type NOT IN ('oauth', 'setup-token')")
 	require.Contains(t, normalized, "upstream_billing_probe_enabled")
 	require.Contains(t, normalized, "IS DISTINCT FROM 'false'::jsonb")
