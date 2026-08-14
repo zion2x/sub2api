@@ -913,8 +913,26 @@
         </div>
       </div>
 
-      <!-- Upstream billing auto probe -->
-      <div v-if="allUpstreamAccounts" class="border-t border-gray-200 pt-4 dark:border-dark-600">
+      <!-- Codex 指纹收敛模式（仅 OpenAI OAuth） -->
+      <div v-if="allOpenAIOAuth" class="border-t border-gray-200 pt-4 dark:border-dark-600">
+        <div class="mb-3 flex items-center justify-between">
+          <label class="input-label mb-0">{{ t('admin.accounts.openai.codexFingerprintMode') }}</label>
+          <input
+            v-model="enableCodexFingerprintMode"
+            type="checkbox"
+            class="rounded border-gray-300 text-primary-600 focus:ring-primary-500"
+          />
+        </div>
+        <div :class="!enableCodexFingerprintMode && 'pointer-events-none opacity-50'">
+          <p class="mb-2 text-xs text-gray-500 dark:text-gray-400">
+            {{ t('admin.accounts.openai.codexFingerprintModeDesc') }}
+          </p>
+          <Select v-model="codexFingerprintMode" data-testid="bulk-codex-fingerprint-mode-select" :options="codexFingerprintModeOptions" />
+        </div>
+      </div>
+
+      <!-- Upstream billing auto probe (any API-key platform) -->
+      <div v-if="allBillingProbeCapable" class="border-t border-gray-200 pt-4 dark:border-dark-600">
         <div class="mb-3 flex items-center justify-between">
           <div class="flex-1 pr-4">
             <label
@@ -1334,7 +1352,6 @@ import {
   resolveOpenAIWSModeConcurrencyHintKey
 } from '@/utils/openaiWsMode'
 import type { OpenAIWSMode } from '@/utils/openaiWsMode'
-import { isUpstreamAccountType } from '@/utils/upstreamAccount'
 interface Props {
   show: boolean
   accountIds: number[]
@@ -1410,10 +1427,12 @@ const allOpenAIAPIKey = computed(() => {
   )
 })
 
-const allUpstreamAccounts = computed(() => {
+// 上游倍率自动探测已放宽到全部 API-key 平台：只要求所选类型全为 apikey，
+// 平台不限（sub2api 上游即可应答 /v1/sub2api/billing）。
+const allBillingProbeCapable = computed(() => {
   return (
     targetSelectedTypes.value.length > 0 &&
-    targetSelectedTypes.value.every(type => isUpstreamAccountType(type))
+    targetSelectedTypes.value.every(t => t === 'apikey')
   )
 })
 
@@ -1514,6 +1533,15 @@ const openaiAPIKeyResponsesWebSocketV2Mode = ref<OpenAIWSMode>(OPENAI_WS_MODE_OF
 const upstreamBillingAutoProbeMode = ref<'enabled' | 'disabled'>('enabled')
 const codexCLIOnlyEnabled = ref(false)
 const codexCLIOnlyAppServerEnabled = ref(false)
+type CodexFingerprintMode = 'off' | 'device' | 'session' | 'full'
+const enableCodexFingerprintMode = ref(false)
+const codexFingerprintMode = ref<CodexFingerprintMode>('session')
+const codexFingerprintModeOptions = computed(() => [
+  { value: 'off' as CodexFingerprintMode, label: t('admin.accounts.openai.codexFingerprintOff') },
+  { value: 'device' as CodexFingerprintMode, label: t('admin.accounts.openai.codexFingerprintDevice') },
+  { value: 'session' as CodexFingerprintMode, label: t('admin.accounts.openai.codexFingerprintSession') },
+  { value: 'full' as CodexFingerprintMode, label: t('admin.accounts.openai.codexFingerprintFull') },
+])
 const openAICompactMode = ref<OpenAICompactMode>('auto')
 const openAICompactModelMappings = ref<ModelMapping[]>([])
 const rpmLimitEnabled = ref(false)
@@ -1799,6 +1827,15 @@ const buildUpdatePayload = (): Record<string, unknown> | null => {
     extra.codex_cli_only_allow_app_server = codexCLIOnlyAppServerEnabled.value
   }
 
+  if (enableCodexFingerprintMode.value) {
+    const extra = ensureExtra()
+    if (codexFingerprintMode.value !== 'session') {
+      extra.codex_fingerprint_mode = codexFingerprintMode.value
+    } else {
+      delete extra.codex_fingerprint_mode
+    }
+  }
+
   if (enableOpenAICompactMode.value) {
     const extra = ensureExtra()
     extra.openai_compact_mode = openAICompactMode.value
@@ -1909,6 +1946,7 @@ const handleSubmit = async () => {
     enableUpstreamBillingAutoProbe.value ||
     enableCodexCLIOnly.value ||
     enableCodexCLIOnlyAppServer.value ||
+    enableCodexFingerprintMode.value ||
     enableOpenAICompactMode.value ||
     enableOpenAICompactModelMapping.value ||
     enableRpmLimit.value ||
@@ -2043,6 +2081,8 @@ watch(
       enableUpstreamBillingAutoProbe.value = false
       enableCodexCLIOnly.value = false
       enableCodexCLIOnlyAppServer.value = false
+      enableCodexFingerprintMode.value = false
+      codexFingerprintMode.value = 'session'
       enableOpenAICompactMode.value = false
       enableOpenAICompactModelMapping.value = false
       enableRpmLimit.value = false
