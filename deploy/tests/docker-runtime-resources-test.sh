@@ -28,7 +28,8 @@ test -s backend/resources/model-pricing/model_prices_and_context_window.json || 
 
 assert_line Dockerfile.goreleaser 'COPY --chown=sub2api:sub2api backend/resources /app/resources'
 assert_line deploy/Dockerfile 'COPY --from=backend-builder --chown=sub2api:sub2api /app/backend/resources /app/resources'
-assert_count .goreleaser.yaml '      - backend/resources' 4
+# .goreleaser.yaml 为 binary-only 发布（不构建 Docker 镜像），仅 .goreleaser.simple.yaml
+# 仍发布 x86_64 GHCR 镜像，因此只校验 simple 配置中的 resources 拷贝。
 assert_count .goreleaser.simple.yaml '      - backend/resources' 1
 
 printf 'docker runtime resources test passed\n'
