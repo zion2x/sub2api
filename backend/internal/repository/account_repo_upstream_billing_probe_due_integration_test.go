@@ -175,8 +175,8 @@ func TestListDueUpstreamBillingProbeAccountsIncludesAllAPIKeyPlatforms(t *testin
 			"upstream_billing_probe": {"status": "ok", "next_probe_at": %q}
 		}`, nextProbeAt)
 		err := scanSingleRow(ctx, tx, `
-			INSERT INTO accounts (name, platform, type, status, extra)
-			VALUES ($1, $2, $3, 'active', $4::jsonb)
+			INSERT INTO accounts (name, platform, type, status, credentials, extra)
+			VALUES ($1, $2, $3, 'active', '{"api_key":"sk-test","base_url":"https://upstream.example"}'::jsonb, $4::jsonb)
 			RETURNING id
 		`, []any{name, platform, accountType, extra}, &id)
 		require.NoError(t, err)
