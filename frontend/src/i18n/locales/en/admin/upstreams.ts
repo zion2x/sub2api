@@ -22,7 +22,7 @@ export default {
       rates: 'Upstream / Local Multiplier',
       today: 'Today',
       sync: 'Last Sync',
-      actions: ''
+      actions: 'Actions'
     },
     accountId: 'ID {id}',
     unknownProvider: 'Unidentified',

@@ -22,7 +22,7 @@ export default {
       rates: '上游倍率 / 本地倍率',
       today: '今日用量',
       sync: '最后同步',
-      actions: ''
+      actions: '操作'
     },
     accountId: '账号 ID {id}',
     unknownProvider: '未识别',
